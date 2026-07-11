@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # App
     environment: str = "development"
     app_name: str = "Farmers Market API"
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "https://farmermarket-brown.vercel.app,http://localhost:5173"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
