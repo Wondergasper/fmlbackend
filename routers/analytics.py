@@ -138,15 +138,40 @@ async def get_revenue_breakdown(
 @router.get("/vendors")
 async def get_vendor_performance(user=Depends(require_role(["admin"]))):
     """
-    Return vendor performance ranking by revenue contributed.
+    Return vendor performance ranking by revenue contributed (descending).
     """
-    res = (
+    # Fetch all active vendors
+    vendors_res = (
         supabase.table("profiles")
         .select("id, full_name, display_name, farm_name, location, rating, products_count, status")
         .eq("role", "vendor")
         .eq("status", "Active")
-        .order("products_count", desc=True)
-        .limit(20)
         .execute()
     )
-    return res.data or []
+    vendors = vendors_res.data or []
+
+    # Compute revenue for each vendor from paid orders
+    result = []
+    for v in vendors:
+        vid = v["id"]
+        orders_res = (
+            supabase.table("orders")
+            .select("total_kobo")
+            .eq("vendor_id", vid)
+            .eq("payment_status", "Paid")
+            .execute()
+        )
+        revenue_kobo = sum(o.get("total_kobo", 0) for o in (orders_res.data or []))
+        result.append({
+            "id": vid,
+            "name": v.get("display_name") or v.get("full_name", "Unknown"),
+            "farm_name": v.get("farm_name"),
+            "location": v.get("location"),
+            "rating": v.get("rating"),
+            "products_count": v.get("products_count", 0),
+            "revenue_kobo": revenue_kobo,
+        })
+
+    # Sort by revenue descending
+    result.sort(key=lambda v: v["revenue_kobo"], reverse=True)
+    return result[:20]

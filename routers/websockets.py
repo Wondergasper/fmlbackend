@@ -9,7 +9,6 @@ import json
 import logging
 import asyncio
 import math
-import os
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from database import supabase, supabase_admin
 from services.websocket_manager import connection_manager
@@ -49,15 +48,10 @@ async def extract_token_from_websocket(websocket: WebSocket, token_query: str | 
 
 async def authenticate_websocket(token: str | None) -> str:
     """
-    Authenticate WebSocket connections using Supabase Auth JWT or strictly gated test tokens.
+    Authenticate WebSocket connections using Supabase Auth JWT.
     """
     if not token:
         raise ValueError("Missing authentication token")
-
-    if token.startswith("test-"):
-        if os.getenv("ENVIRONMENT") == "production":
-            raise ValueError("Test tokens are disabled in production environment")
-        return "test-user-id"
 
     try:
         user_res = await asyncio.to_thread(supabase.auth.get_user, token)
@@ -73,17 +67,11 @@ async def authorize_websocket_order(user_id: str, order_id: str) -> bool:
     """
     Verify if the user is authorized to connect to the order tracking stream.
     Authorized users:
-    - Test tokens / test users / mock test orders
     - Customer who placed the order (customer_id == user_id)
     - Vendor who has products in the order
     - Admin user (role == "admin")
     - Logistics / driver (role == "driver" or "courier")
     """
-    if user_id.startswith("test-") or order_id.startswith("ord_"):
-        if os.getenv("ENVIRONMENT") == "production":
-            return False
-        return True
-
     try:
         profile_res = await asyncio.to_thread(
             lambda: supabase.table("profiles").select("role").eq("id", user_id).single().execute()

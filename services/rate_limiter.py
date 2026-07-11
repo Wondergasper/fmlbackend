@@ -4,15 +4,16 @@ import uuid
 import logging
 from typing import Optional
 
+from config import settings
 from fastapi import Request, Response
 from redis.asyncio import Redis
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "100"))
+REDIS_URL = settings.redis_url
+RATE_LIMIT_WINDOW_SECONDS = settings.rate_limit_window_seconds
+RATE_LIMIT_MAX_REQUESTS = settings.rate_limit_max_requests
 RATE_LIMIT_KEY_PREFIX = os.getenv("RATE_LIMIT_KEY_PREFIX", "rate_limit")
 RATE_LIMIT_EXCLUDED_PATHS = ["/docs", "/redoc", "/openapi.json", "/health"]
 

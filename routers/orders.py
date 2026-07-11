@@ -466,6 +466,16 @@ async def update_order_status(
                     supabase_admin.table("profiles").update(
                         {"wallet_balance": cur_bal + total}
                     ).eq("id", cust_id).execute()
+
+                    # Log refund transaction for audit trail
+                    supabase_admin.table("wallet_transactions").insert({
+                        "user_id": cust_id,
+                        "type": "Refund",
+                        "amount_kobo": total,
+                        "reference": f"refund_order_{order_id}",
+                        "status": "Success",
+                        "description": f"Refund for cancelled order {order_id}",
+                    }).execute()
         except Exception as exc:
             logger.warning(f"[orders] Wallet refund on cancellation failed for {order_id}: {exc}")
 

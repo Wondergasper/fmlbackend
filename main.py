@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import products, auth, orders, vendors, wallet, analytics, uploads, websockets, disputes, admin
+from config import settings
 from services.email import send_weekly_vendor_digest
 from services.rate_limiter import RateLimitMiddleware, init_redis, close_redis
 from services.websocket_manager import connection_manager
@@ -125,13 +126,10 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 # CORS — allow the Vite dev client and production frontend
 # ---------------------------------------------------------------------------
+cors_origins = [o.strip() for o in settings.cors_origins.split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",   # Vite dev server
-        "http://localhost:3000",   # alternative dev port
-        "https://farmersmarket.vercel.app",  # production (update as needed)
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

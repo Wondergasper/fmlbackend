@@ -19,6 +19,7 @@ Max file size:     5 MB  (enforced by FastAPI / python-multipart before reaching
 import os
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from config import settings
 from dependencies import require_role, get_current_user
 from database import supabase_admin
 
@@ -46,7 +47,7 @@ def _build_storage_path(vendor_id: str, content_type: str) -> str:
 
 def _public_url(path: str) -> str:
     """Derive the public URL for a Supabase Storage object."""
-    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    supabase_url = settings.supabase_url.rstrip("/")
     return f"{supabase_url}/storage/v1/object/public/{BUCKET}/{path}"
 
 
@@ -144,30 +145,33 @@ async def upload_product_image(
             detail=f"Unsupported file type '{content_type}'. Allowed: JPEG, PNG, WebP.",
         )
 
-    # ── Read & validate size ─────────────────────────────────────────────────
-    file_bytes = await file.read()
-    if len(file_bytes) > MAX_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File exceeds the 5 MB size limit.",
-        )
-
-    # ── Validate actual file content via magic bytes (anti-spoofing) ─────────
-    _validate_image_bytes(file_bytes, content_type)
-
-    # ── Upload to Supabase Storage ──────────────────────────────────────────
-    storage_path = _build_storage_path(str(user.id), content_type)
     try:
-        supabase_admin.storage.from_(BUCKET).upload(
-            path=storage_path,
-            file=file_bytes,
-            file_options={"content-type": content_type, "cache-control": "3600", "upsert": "false"},
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Storage upload failed: {exc}",
-        )
+        # ── Read & validate size ─────────────────────────────────────────────────
+        file_bytes = await file.read()
+        if len(file_bytes) > MAX_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File exceeds the 5 MB size limit.",
+            )
+
+        # ── Validate actual file content via magic bytes (anti-spoofing) ─────────
+        _validate_image_bytes(file_bytes, content_type)
+
+        # ── Upload to Supabase Storage ──────────────────────────────────────────
+        storage_path = _build_storage_path(str(user.id), content_type)
+        try:
+            supabase_admin.storage.from_(BUCKET).upload(
+                path=storage_path,
+                file=file_bytes,
+                file_options={"content-type": content_type, "cache-control": "3600", "upsert": "false"},
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Storage upload failed: {exc}",
+            )
+    finally:
+        await file.close()
 
     public_url = _public_url(storage_path)
     return {"url": public_url, "path": storage_path}

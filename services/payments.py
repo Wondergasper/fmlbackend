@@ -6,9 +6,11 @@ import logging
 import urllib.request
 from typing import Any
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
-PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "")
+PAYSTACK_SECRET_KEY = settings.paystack_secret_key
 PAYSTACK_WEBHOOK_SECRET = os.getenv("PAYSTACK_WEBHOOK_SECRET", "")
 PAYSTACK_CALLBACK_URL = os.getenv("PAYSTACK_CALLBACK_URL", "")
 PAYSTACK_INITIALIZE_URL = "https://api.paystack.co/transaction/initialize"

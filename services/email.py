@@ -36,6 +36,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
 from celery_app import celery_app
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +44,17 @@ logger = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-RESEND_API_KEY  = os.getenv("RESEND_API_KEY", "")
+RESEND_API_KEY  = settings.resend_api_key
 RESEND_API_URL  = "https://api.resend.com/emails"
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+SENDGRID_API_KEY = settings.sendgrid_api_key
 FROM_EMAIL       = os.getenv("FROM_EMAIL", "noreply@farmconnect.ng")
 FROM_NAME        = os.getenv("FROM_NAME", "Farm-Connect")
 FRONTEND_URL     = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_HOST = settings.smtp_host
+SMTP_PORT = settings.smtp_port
+SMTP_USER = settings.smtp_user
+SMTP_PASS = settings.smtp_password
 
 # Brand colours
 COLOR_PRIMARY   = "#2D6A4F"   # deep forest green

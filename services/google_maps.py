@@ -12,14 +12,15 @@ All network calls use httpx with a 5-second timeout so they never block the even
 Every function returns None / (None, None) on any failure — callers must handle gracefully.
 """
 
-import os
 import logging
 import httpx
 from typing import Optional, Tuple
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+GOOGLE_MAPS_API_KEY = settings.google_maps_api_key
 _TIMEOUT = 5.0  # seconds for all external HTTP calls
 
 

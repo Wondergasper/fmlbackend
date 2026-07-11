@@ -90,8 +90,21 @@ async def topup_wallet(
 ):
     """
     Credit the customer's wallet by the specified amount.
-    In production, validate the payment gateway reference before crediting.
+    Checks for duplicate references to prevent double-credit (idempotent).
     """
+    # Check duplicate reference (idempotency)
+    existing_tx = (
+        supabase_admin.table("wallet_transactions")
+        .select("id")
+        .eq("reference", payload.reference)
+        .execute()
+    )
+    if existing_tx.data:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This transaction was already processed."
+        )
+
     # Fetch current balance
     profile_res = (
         supabase.table("profiles")

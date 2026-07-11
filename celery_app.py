@@ -4,6 +4,8 @@ celery_app.py — Celery Application Configuration for Farm-Connect
 
 import os
 
+from config import settings
+
 try:
     from celery import Celery
 except ImportError:
@@ -42,13 +44,13 @@ except ImportError:
             pass
 
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
+REDIS_URL = settings.redis_url
+BROKER_URL = settings.celery_broker_url
 
 celery_app = Celery(
     "farmconnect_tasks",
     broker=BROKER_URL,
-    backend=REDIS_URL,
+    backend=settings.celery_result_backend,
     include=["services.email"]
 )
 
