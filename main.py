@@ -2,9 +2,10 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import products, auth, orders, vendors, wallet, analytics, uploads
+from routers import products, auth, orders, vendors, wallet, analytics, uploads, websockets, disputes, admin
 from services.email import send_weekly_vendor_digest
 from services.rate_limiter import RateLimitMiddleware, init_redis, close_redis
+from services.websocket_manager import connection_manager
 from database import supabase
 
 logger = logging.getLogger(__name__)
@@ -33,16 +34,23 @@ def _run_weekly_digest() -> None:
         )
         for vendor in (vendors_res.data or []):
             vid   = vendor["id"]
-            # Revenue & order count for the week
+            # Revenue & order count for the week (vendor's share only)
             orders_res = (
                 supabase.table("orders")
-                .select("total_kobo, order_items!inner(quantity, products!inner(vendor_id, name, stock))")
+                .select("id, order_items!inner(quantity, unit_price_kobo, products!inner(vendor_id, name, stock))")
                 .eq("order_items.products.vendor_id", vid)
                 .gte("created_at", start.isoformat())
                 .execute()
             )
             orders_data = orders_res.data or []
-            revenue  = sum(o.get("total_kobo", 0) for o in orders_data)
+            revenue = 0
+            units_sold = 0
+            for order in orders_data:
+                for item in (order.get("order_items") or []):
+                    qty = item.get("quantity", 0)
+                    price = item.get("unit_price_kobo", 0)
+                    revenue += qty * price
+                    units_sold += qty
             n_orders = len(orders_data)
 
             # Low-stock products
@@ -60,14 +68,14 @@ def _run_weekly_digest() -> None:
                 "week_label":        week_label,
                 "revenue_kobo":      revenue,
                 "orders_count":      n_orders,
-                "units_sold":        0,
+                "units_sold":        units_sold,
                 "avg_rating":        0.0,
                 "top_product_name":  "\u2014",
                 "top_product_units": 0,
                 "low_stock_count":   len(low_products),
                 "low_stock_names":   [p["name"] for p in low_products],
             }
-            send_weekly_vendor_digest(
+            send_weekly_vendor_digest.delay(
                 vendor["email"], vendor["full_name"], stats
             )
     except Exception as exc:
@@ -77,13 +85,7 @@ def _run_weekly_digest() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start APScheduler on app startup; shut it down cleanly on exit."""
-    try:
-        from apscheduler.schedulers.background import BackgroundScheduler
-        scheduler = BackgroundScheduler(timezone="UTC")
-        # Every Monday at 07:00 UTC (08:00 WAT)
-        scheduler.add_job(_run_weekly_digest, "cron", day_of_week="mon", hour=7, minute=0)
-        scheduler.start()
-        logger.info("[scheduler] Weekly digest cron started (Mon 07:00 UTC).")
+    scheduler = None
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler(timezone="UTC")
@@ -93,15 +95,20 @@ async def lifespan(app: FastAPI):
         logger.info("[scheduler] Weekly digest cron started (Mon 07:00 UTC).")
     except ImportError:
         logger.warning("[scheduler] apscheduler not installed — weekly digest disabled.")
-        scheduler = None
 
+    pubsub_task = None
     try:
         await init_redis()
+        if hasattr(connection_manager, "start_redis_listener"):
+            import asyncio
+            pubsub_task = asyncio.create_task(connection_manager.start_redis_listener())
     except Exception as exc:
         logger.warning(f"[rate_limiter] Redis initialization failed: {exc}")
 
     yield
 
+    if pubsub_task:
+        pubsub_task.cancel()
     if scheduler:
         scheduler.shutdown(wait=False)
     await close_redis()
@@ -142,6 +149,9 @@ app.include_router(vendors.router)    # /vendors/ (list, profile, status)
 app.include_router(wallet.router)     # /wallet/ (balance, topup, history)
 app.include_router(analytics.router)  # /analytics/ (KPI, revenue, vendor rank)
 app.include_router(uploads.router)    # /uploads/ (product image upload to Supabase Storage)
+app.include_router(websockets.router) # /ws/orders/{order_id} (real-time order tracking & notifications)
+app.include_router(disputes.router)   # /disputes/ (structured dispute audit trail & resolution)
+app.include_router(admin.router)      # /admin/config (platform config persistence) & /admin/categories (CRUD)
 
 # ---------------------------------------------------------------------------
 # Health check
@@ -151,7 +161,7 @@ def health_check():
     return {
         "status": "healthy",
         "service": "Farmers Market API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "docs": "/docs",
     }
 

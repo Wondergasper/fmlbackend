@@ -7,7 +7,7 @@ Endpoints:
   GET  /wallet/history    — Get wallet transaction history
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, field_validator
 from dependencies import get_current_user, require_role
 from database import supabase, supabase_admin
@@ -52,17 +52,17 @@ async def get_balance(user=Depends(get_current_user)):
     """
     Return the current wallet balance for the authenticated user.
     """
-    profile = (
+    profile_res = (
         supabase.table("profiles")
         .select("wallet_balance")
         .eq("id", user.id)
-        .single()
         .execute()
     )
-    if not profile.data:
+    profile_data = profile_res.data[0] if profile_res.data else None
+    if not profile_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
 
-    balance_kobo = profile.data.get("wallet_balance", 0)
+    balance_kobo = profile_data.get("wallet_balance", 0)
     return {
         "balance_kobo": balance_kobo,
         "balance_naira": balance_kobo / 100,
@@ -86,7 +86,6 @@ class PaystackInitRequest(BaseModel):
 @router.post("/topup")
 async def topup_wallet(
     payload: TopupRequest,
-    background_tasks: BackgroundTasks,
     user=Depends(require_role(["customer"]))
 ):
     """
@@ -94,17 +93,17 @@ async def topup_wallet(
     In production, validate the payment gateway reference before crediting.
     """
     # Fetch current balance
-    profile = (
+    profile_res = (
         supabase.table("profiles")
         .select("wallet_balance")
         .eq("id", user.id)
-        .single()
         .execute()
     )
-    if not profile.data:
+    profile_data = profile_res.data[0] if profile_res.data else None
+    if not profile_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
 
-    current_balance = profile.data.get("wallet_balance", 0)
+    current_balance = profile_data.get("wallet_balance", 0)
     new_balance = current_balance + payload.amount_kobo
 
     # Update balance (admin client to bypass RLS)
@@ -122,18 +121,17 @@ async def topup_wallet(
     supabase_admin.table("wallet_transactions").insert(tx_data).execute()
 
     # ── Email notification ────────────────────────────────────────────────
-    cust = (
+    cust_res = (
         supabase.table("profiles")
         .select("email, full_name")
         .eq("id", user.id)
-        .single()
         .execute()
     )
-    if cust.data:
-        background_tasks.add_task(
-            send_wallet_topup_receipt,
-            cust.data.get("email", ""),
-            cust.data.get("full_name", "Customer"),
+    cust_data = cust_res.data[0] if cust_res.data else None
+    if cust_data:
+        send_wallet_topup_receipt.delay(
+            cust_data.get("email", ""),
+            cust_data.get("full_name", "Customer"),
             payload.amount_kobo,
             payload.reference,
             new_balance,
@@ -154,18 +152,18 @@ async def init_paystack_topup(
     user=Depends(require_role(["customer"]))
 ):
     """Initialize a Paystack transaction for a wallet top-up."""
-    profile = (
+    profile_res = (
         supabase.table("profiles")
         .select("email")
         .eq("id", user.id)
-        .single()
         .execute()
     )
-    if not profile.data:
+    profile_data = profile_res.data[0] if profile_res.data else None
+    if not profile_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
 
     try:
-        init_data = initialize_paystack_transaction(profile.data["email"], payload.amount_kobo, user.id)
+        init_data = initialize_paystack_transaction(profile_data["email"], payload.amount_kobo, user.id)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
@@ -177,7 +175,7 @@ async def init_paystack_topup(
 
 
 @router.post("/paystack/verify")
-async def verify_paystack_topup(payload: TopupRequest, background_tasks: BackgroundTasks, user=Depends(require_role(["customer"]))):
+async def verify_paystack_topup(payload: TopupRequest, user=Depends(require_role(["customer"]))):
     """Verify Paystack transaction and credit wallet on success."""
     try:
         txn = verify_paystack_transaction(payload.reference)
@@ -192,17 +190,17 @@ async def verify_paystack_topup(payload: TopupRequest, background_tasks: Backgro
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payment metadata does not match user.")
 
     amount_kobo = txn.get("amount", 0)
-    profile = (
+    profile_res = (
         supabase.table("profiles")
         .select("wallet_balance")
         .eq("id", user.id)
-        .single()
         .execute()
     )
-    if not profile.data:
+    profile_data = profile_res.data[0] if profile_res.data else None
+    if not profile_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
 
-    new_balance = profile.data.get("wallet_balance", 0) + amount_kobo
+    new_balance = profile_data.get("wallet_balance", 0) + amount_kobo
     supabase_admin.table("profiles").update({"wallet_balance": new_balance}).eq("id", user.id).execute()
     supabase_admin.table("wallet_transactions").insert({
         "user_id": user.id,
@@ -213,18 +211,17 @@ async def verify_paystack_topup(payload: TopupRequest, background_tasks: Backgro
         "description": "Wallet top-up via Paystack",
     }).execute()
 
-    cust = (
+    cust_res = (
         supabase.table("profiles")
         .select("email, full_name")
         .eq("id", user.id)
-        .single()
         .execute()
     )
-    if cust.data:
-        background_tasks.add_task(
-            send_wallet_topup_receipt,
-            cust.data.get("email", ""),
-            cust.data.get("full_name", "Customer"),
+    cust_data = cust_res.data[0] if cust_res.data else None
+    if cust_data:
+        send_wallet_topup_receipt.delay(
+            cust_data.get("email", ""),
+            cust_data.get("full_name", "Customer"),
             amount_kobo,
             payload.reference,
             new_balance,
@@ -260,15 +257,15 @@ async def paystack_webhook(request: Request):
     if not user_id or amount_kobo <= 0:
         return {"received": True}
 
-    profile = (
+    profile_res = (
         supabase.table("profiles")
         .select("wallet_balance")
         .eq("id", user_id)
-        .single()
         .execute()
     )
-    if profile.data:
-        new_balance = profile.data.get("wallet_balance", 0) + amount_kobo
+    profile_data = profile_res.data[0] if profile_res.data else None
+    if profile_data:
+        new_balance = profile_data.get("wallet_balance", 0) + amount_kobo
         supabase_admin.table("profiles").update({"wallet_balance": new_balance}).eq("id", user_id).execute()
         supabase_admin.table("wallet_transactions").insert({
             "user_id": user_id,
@@ -280,6 +277,69 @@ async def paystack_webhook(request: Request):
         }).execute()
 
     return {"received": True}
+
+
+@router.post("/payout")
+async def request_payout(
+    payload: TopupRequest,
+    user=Depends(require_role(["vendor"]))
+):
+    """
+    Vendor: Request a payout of available wallet balance to their bank account.
+    Deducts the requested amount from the vendor's wallet and logs the transaction.
+    """
+    # Fetch current balance
+    profile_res = (
+        supabase.table("profiles")
+        .select("wallet_balance, bank_name, account_number, account_name")
+        .eq("id", user.id)
+        .execute()
+    )
+    profile_data = profile_res.data[0] if profile_res.data else None
+    if not profile_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
+
+    current_balance = profile_data.get("wallet_balance", 0)
+
+    if payload.amount_kobo <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid payout amount.")
+    if payload.amount_kobo > current_balance:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Insufficient balance. Available: ₦{current_balance / 100:,.2f}, Requested: ₦{payload.amount_kobo / 100:,.2f}"
+        )
+
+    bank_info = {
+        "bank_name": profile_data.get("bank_name"),
+        "account_number": profile_data.get("account_number"),
+        "account_name": profile_data.get("account_name"),
+    }
+    if not all(bank_info.values()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bank details not configured. Please update your bank information in settings before requesting a payout."
+        )
+
+    new_balance = current_balance - payload.amount_kobo
+    supabase_admin.table("profiles").update({"wallet_balance": new_balance}).eq("id", user.id).execute()
+
+    tx_data = {
+        "user_id": user.id,
+        "type": "Payout",
+        "amount_kobo": payload.amount_kobo,
+        "reference": payload.reference,
+        "status": "Pending",
+        "description": f"Payout request to {bank_info['bank_name']} ({bank_info['account_number']})",
+    }
+    supabase_admin.table("wallet_transactions").insert(tx_data).execute()
+
+    return {
+        "message": "Payout request submitted successfully.",
+        "amount_kobo": payload.amount_kobo,
+        "amount_naira": payload.amount_kobo / 100,
+        "new_balance_kobo": new_balance,
+        "status": "Pending",
+    }
 
 
 @router.get("/history")

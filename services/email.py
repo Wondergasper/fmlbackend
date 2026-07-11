@@ -31,9 +31,11 @@ Supported notifications (15 total):
 import os
 import smtplib
 import logging
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
+from celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +110,7 @@ def _base_html(title: str, body: str) -> str:
           <tr>
             <td style="background-color:{COLOR_ACCENT};padding:20px 32px;text-align:center;">
               <p style="margin:0;font-size:12px;color:{COLOR_MUTED};">
-                © 2025 Farm-Connect Nigeria · 
+                © {datetime.now().year} Farm-Connect Nigeria · 
                 <a href="{FRONTEND_URL}" style="color:{COLOR_PRIMARY};text-decoration:none;">
                   Visit our market
                 </a>
@@ -208,6 +210,7 @@ def _send_via_resend(to: str, subject: str, html: str) -> None:
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
+            "User-Agent": "Farm-Connect/1.0",
         },
         method="POST",
     )
@@ -280,9 +283,41 @@ def send_email(to: str, subject: str, html: str) -> None:
 
 
 # ===========================================================================
+# ⓪ OTP VERIFICATION
+# ===========================================================================
+
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
+def send_otp_email(email: str, name: str, otp_code: str) -> None:
+    """#0 — Send email OTP verification code."""
+    first = name.split()[0] if name else "there"
+    body = f"""
+    <h2 style="margin:0 0 8px;color:{COLOR_DARK};font-size:24px;font-weight:800;">
+      Your verification code 🔐
+    </h2>
+    <p style="margin:0 0 16px;color:{COLOR_MUTED};font-size:14px;line-height:1.6;">
+      Hi {first}, use the code below to verify your Farm-Connect account.
+      This code expires in <strong>10 minutes</strong>.
+    </p>
+    <div style="text-align:center;margin:32px 0;">
+      <span style="display:inline-block;font-size:42px;font-weight:900;letter-spacing:12px;
+                   font-family:'Courier New',monospace;color:{COLOR_DARK};
+                   background-color:{COLOR_ACCENT};padding:20px 32px;border-radius:16px;">
+        {otp_code}
+      </span>
+    </div>
+    <p style="margin:0;font-size:13px;color:{COLOR_MUTED};text-align:center;">
+      If you did not request this code, please ignore this email.
+    </p>
+    {_btn("Go to Farm-Connect →", FRONTEND_URL)}
+    """
+    send_email(email, f"Your Farm-Connect verification code: {otp_code}", _base_html("OTP Verification", body))
+
+
+# ===========================================================================
 # ① ACCOUNT NOTIFICATIONS
 # ===========================================================================
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_welcome_customer(email: str, name: str) -> None:
     """#1 — Welcome email for new customer accounts."""
     first = name.split()[0] if name else "there"
@@ -307,6 +342,7 @@ def send_welcome_customer(email: str, name: str) -> None:
     send_email(email, f"Welcome to Farm-Connect, {first}! 🌾", _base_html("Welcome", body))
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_welcome_vendor(email: str, name: str) -> None:
     """#1b — Welcome email for new vendor accounts (pending approval)."""
     body = f"""
@@ -332,6 +368,7 @@ def send_welcome_vendor(email: str, name: str) -> None:
     send_email(email, "Farm-Connect — Your vendor application is under review", _base_html("Vendor Application", body))
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_admin_new_vendor(admin_email: str, vendor_name: str, vendor_email: str, vendor_id: str) -> None:
     """#2 — Alert admin when a new vendor registers."""
     body = f"""
@@ -352,6 +389,7 @@ def send_admin_new_vendor(admin_email: str, vendor_name: str, vendor_email: str,
     send_email(admin_email, f"New vendor application — {vendor_name}", _base_html("New Vendor", body))
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_vendor_approved(email: str, name: str) -> None:
     """#3 — Vendor account approved by admin."""
     body = f"""
@@ -374,6 +412,7 @@ def send_vendor_approved(email: str, name: str) -> None:
     send_email(email, "Your Farm-Connect vendor account is approved! ✅", _base_html("Account Approved", body))
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_vendor_suspended(email: str, name: str, reason: Optional[str] = None) -> None:
     """#4 — Vendor account suspended by admin."""
     reason_block = f"""
@@ -448,6 +487,7 @@ def _format_items(items: list) -> str:
     </table>"""
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_order_confirmation(
     email: str,
     name: str,
@@ -488,6 +528,7 @@ def send_order_confirmation(
     )
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_new_sale_alert(
     vendor_email: str,
     vendor_name: str,
@@ -523,6 +564,7 @@ def send_new_sale_alert(
     )
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_order_in_transit(
     email: str,
     name: str,
@@ -556,6 +598,7 @@ def send_order_in_transit(
     )
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_order_delivered(
     email: str,
     name: str,
@@ -588,6 +631,7 @@ def send_order_delivered(
     )
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_order_cancelled(
     email: str,
     name: str,
@@ -632,6 +676,7 @@ def send_order_cancelled(
 # ③ WALLET NOTIFICATIONS
 # ===========================================================================
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_wallet_topup_receipt(
     email: str,
     name: str,
@@ -675,6 +720,7 @@ def send_wallet_topup_receipt(
 # ④ PRODUCT NOTIFICATIONS
 # ===========================================================================
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_product_submitted(
     vendor_email: str,
     vendor_name: str,
@@ -707,6 +753,7 @@ def send_product_submitted(
     )
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_product_approved(
     vendor_email: str,
     vendor_name: str,
@@ -739,6 +786,7 @@ def send_product_approved(
     )
 
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_product_rejected(
     vendor_email: str,
     vendor_name: str,
@@ -786,6 +834,7 @@ def send_product_rejected(
 # ⑤ WEEKLY DIGEST
 # ===========================================================================
 
+@celery_app.task(autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_weekly_vendor_digest(
     vendor_email: str,
     vendor_name: str,

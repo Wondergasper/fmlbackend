@@ -1,34 +1,64 @@
-# Python
-*.py[cod]
+# Python bytecode
 __pycache__/
-*.so
-*.egg
-*.egg-info/
-.eggs/
-.python-version
-
-# Virtual environments
-venv/
-.env
-
-# Byte-compiled / optimized / DLL files
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 
 # Distribution / packaging
-.Python
 build/
 dist/
 *.egg-info/
+.eggs/
+.Python
+*.egg
+*.manifest
+*.spec
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# Environment variables
+.env
+.env.*
+
+# Pytest cache
+.pytest_cache/
+
+# C extensions
+*.so
+
+# Logs and databases
+*.log
+*.sqlite3
 
 # IDEs and editors
 .vscode/
 .idea/
-
-# Environment variables
-.env
+*.swp
+*~
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local AI/agent state
+.agents/
+
+# Ignore generated Python artifacts
+coverage.xml
+htmlcov/
+*.cover
+*.coverage
+
+# Keep test sources
+!test/
+
+# Project config
+# Ignore local test artifacts, not source files
+pytest.ini
+
+test 

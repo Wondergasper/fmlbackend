@@ -72,6 +72,10 @@ async def get_platform_summary(user=Depends(require_role(["admin"]))):
     )
     pending_vendors = pending_vendors_res.count or 0
 
+    # Read platform fee rate from config (fallback 5%)
+    config_res = supabase.table("platform_config").select("platform_fees").eq("id", "platform-config").execute()
+    fee_pct = (config_res.data[0]["platform_fees"] / 100) if (config_res.data and config_res.data[0].get("platform_fees")) else 0.05
+
     return {
         "customers": {
             "total": total_customers,
@@ -90,9 +94,9 @@ async def get_platform_summary(user=Depends(require_role(["admin"]))):
             "gmv_kobo": total_gmv_kobo,
             "gmv_naira": total_gmv_kobo / 100,
             "formatted": f"₦{total_gmv_kobo / 100:,.2f}",
-            # Platform commission (e.g. 5%)
-            "commission_kobo": int(total_gmv_kobo * 0.05),
-            "commission_naira": total_gmv_kobo * 0.05 / 100,
+            "platform_fee_pct": fee_pct * 100,
+            "commission_kobo": int(total_gmv_kobo * fee_pct),
+            "commission_naira": total_gmv_kobo * fee_pct / 100,
         },
         "products": {
             "total": total_products,
@@ -138,10 +142,10 @@ async def get_vendor_performance(user=Depends(require_role(["admin"]))):
     """
     res = (
         supabase.table("profiles")
-        .select("id, full_name, display_name, farm_name, location, rating, status")
+        .select("id, full_name, display_name, farm_name, location, rating, products_count, status")
         .eq("role", "vendor")
         .eq("status", "Active")
-        .order("rating", desc=True)
+        .order("products_count", desc=True)
         .limit(20)
         .execute()
     )

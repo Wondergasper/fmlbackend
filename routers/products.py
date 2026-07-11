@@ -11,11 +11,11 @@ Endpoints:
   PATCH  /products/{id}/status   — Admin: approve or reject a product listing
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, HttpUrl
 from typing import Optional
 from dependencies import require_role, get_current_user
-from database import supabase, supabase_admin
+from database import supabase, supabase_admin, supabase_admin
 from services.email import (
     send_product_submitted,
     send_product_approved,
@@ -69,8 +69,14 @@ async def get_products(
 ):
     """
     Public: browse approved products with optional filtering.
+    Excludes products from suspended vendors.
     """
-    query = supabase.table("products").select("*").eq("status", "Approved")
+    query = (
+        supabase_admin.table("products")
+        .select("*, vendor:profiles!vendor_id(status)")
+        .eq("status", "Approved")
+        .eq("vendor.status", "Active")
+    )
 
     if category:
         query = query.eq("category", category)
@@ -90,26 +96,25 @@ async def get_products(
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def list_product(
     product: ProductCreate,
-    background_tasks: BackgroundTasks,
     user=Depends(require_role(["vendor", "admin"]))
 ):
     """Vendors or Admins upload a new product listing."""
     product_data = product.model_dump()
     product_data["vendor_id"] = user.id
     # Admin uploads are auto-approved; vendor submissions go to Pending Approval
-    profile = supabase.table("profiles").select("role, email, full_name").eq("id", user.id).single().execute()
-    role = profile.data.get("role") if profile.data else "vendor"
+    profile_res = supabase.table("profiles").select("role, email, full_name").eq("id", user.id).execute()
+    profile_data = profile_res.data[0] if profile_res.data else None
+    role = profile_data.get("role") if profile_data else "vendor"
     product_data["status"] = "Approved" if role == "admin" else "Pending Approval"
 
     res = supabase_admin.table("products").insert(product_data).execute()
     new_product = res.data[0]
 
     # ── Email notification (vendors only — admins are auto-approved) ─────────
-    if role == "vendor" and profile.data:
-        background_tasks.add_task(
-            send_product_submitted,
-            profile.data.get("email", ""),
-            profile.data.get("full_name", "Vendor"),
+    if role == "vendor" and profile_data:
+        send_product_submitted.delay(
+            profile_data.get("email", ""),
+            profile_data.get("full_name", "Vendor"),
             product.name,
             new_product.get("id", ""),
         )
@@ -120,10 +125,14 @@ async def list_product(
 @router.get("/{product_id}")
 async def get_product(product_id: str):
     """Public: get a single product's full detail."""
-    res = supabase.table("products").select("*").eq("id", product_id).single().execute()
+    try:
+        res = supabase.table("products").select("*").eq("id", product_id).execute()
+    except Exception as exc:
+        print(f"[ERROR] get_product failed for {product_id}: {exc}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
     if not res.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
-    return res.data
+    return res.data[0]
 
 
 @router.patch("/{product_id}")
@@ -215,7 +224,6 @@ async def update_product_image(
 async def update_product_status(
     product_id: str,
     payload: ProductStatusUpdate,
-    background_tasks: BackgroundTasks,
     user=Depends(require_role(["admin"]))
 ):
     """Admin only: approve, reject, or suspend a product listing."""
@@ -235,28 +243,26 @@ async def update_product_status(
     product_data = res.data[0]
     vendor_id    = product_data.get("vendor_id")
     if vendor_id:
-        vendor = (
+        vendor_res = (
             supabase.table("profiles")
             .select("email, full_name")
             .eq("id", vendor_id)
-            .single()
             .execute()
         )
-        if vendor.data:
-            v_email = vendor.data.get("email", "")
-            v_name  = vendor.data.get("full_name", "Vendor")
+        vendor_data = vendor_res.data[0] if vendor_res.data else None
+        if vendor_data:
+            v_email = vendor_data.get("email", "")
+            v_name  = vendor_data.get("full_name", "Vendor")
             p_name  = product_data.get("name", "Your product")
             p_price = product_data.get("price", 0)
             p_stock = product_data.get("stock", 0)
 
             if payload.status == "Approved":
-                background_tasks.add_task(
-                    send_product_approved,
+                send_product_approved.delay(
                     v_email, v_name, p_name, product_id, p_price, p_stock,
                 )
             elif payload.status == "Rejected":
-                background_tasks.add_task(
-                    send_product_rejected,
+                send_product_rejected.delay(
                     v_email, v_name, p_name, product_id, payload.reason,
                 )
 

@@ -9,7 +9,7 @@ Endpoints:
   PATCH /vendors/me/profile    — Update authenticated vendor's own profile
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 from dependencies import get_current_user, require_role
@@ -39,6 +39,17 @@ class VendorProfileUpdate(BaseModel):
     account_number: Optional[str] = None
     account_name: Optional[str] = None
     phone: Optional[str] = None
+
+class AdminVendorUpdate(BaseModel):
+    full_name: Optional[str] = None
+    display_name: Optional[str] = None
+    bio: Optional[str] = None
+    farm_name: Optional[str] = None
+    location: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    rating: Optional[float] = None
+    status: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -70,12 +81,11 @@ async def get_my_vendor_profile(user=Depends(require_role(["vendor"]))):
         supabase.table("profiles")
         .select("*")
         .eq("id", user.id)
-        .single()
         .execute()
     )
     if not res.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vendor profile not found.")
-    return res.data
+    return res.data[0]
 
 
 @router.patch("/me/profile")
@@ -99,15 +109,15 @@ async def get_vendor(vendor_id: str):
     """
     Public endpoint: Get a vendor's profile and their approved products.
     """
-    vendor = (
+    vendor_res = (
         supabase.table("profiles")
         .select("id, full_name, display_name, farm_name, location, bio, rating, status")
         .eq("id", vendor_id)
         .eq("role", "vendor")
-        .single()
         .execute()
     )
-    if not vendor.data:
+    vendor_data = vendor_res.data[0] if vendor_res.data else None
+    if not vendor_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vendor not found.")
 
     products = (
@@ -119,16 +129,36 @@ async def get_vendor(vendor_id: str):
     )
 
     return {
-        "vendor": vendor.data,
+        "vendor": vendor_data,
         "products": products.data or [],
     }
+
+
+@router.patch("/{vendor_id}")
+async def admin_update_vendor(
+    vendor_id: str,
+    payload: AdminVendorUpdate,
+    user=Depends(require_role(["admin"]))
+):
+    """
+    Admin: Update any vendor's profile fields (name, contact, location, rating, etc.).
+    Addresses the gap where admin profile edits were previously local-only.
+    """
+    update_data = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided to update.")
+
+    res = supabase_admin.table("profiles").update(update_data).eq("id", vendor_id).eq("role", "vendor").execute()
+    if not res.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vendor not found.")
+
+    return {"message": "Vendor updated successfully.", "data": res.data[0]}
 
 
 @router.patch("/{vendor_id}/status")
 async def update_vendor_status(
     vendor_id: str,
     payload: VendorStatusUpdate,
-    background_tasks: BackgroundTasks,
     user=Depends(require_role(["admin"]))
 ):
     """
@@ -155,8 +185,8 @@ async def update_vendor_status(
     v_name  = vendor_data.get("full_name", "Vendor")
 
     if payload.status == "Active":
-        background_tasks.add_task(send_vendor_approved, v_email, v_name)
+        send_vendor_approved.delay(v_email, v_name)
     elif payload.status == "Suspended":
-        background_tasks.add_task(send_vendor_suspended, v_email, v_name, payload.reason)
+        send_vendor_suspended.delay(v_email, v_name, payload.reason)
 
     return {"message": f"Vendor status updated to '{payload.status}'.", "vendor_id": vendor_id}

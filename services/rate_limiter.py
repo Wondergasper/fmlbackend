@@ -1,4 +1,6 @@
 import os
+import time
+import uuid
 import logging
 from typing import Optional
 
@@ -33,16 +35,23 @@ async def init_redis() -> None:
     if redis_client is not None:
         return
 
-    redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
-    await redis_client.ping()
-    logger.info(f"[rate_limiter] Connected to Redis at {REDIS_URL}")
+    try:
+        redis_client = Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
+        await redis_client.ping()
+        logger.info(f"[rate_limiter] Connected to Redis at {REDIS_URL}")
+    except Exception as exc:
+        logger.warning(f"[rate_limiter] Could not connect to Redis at {REDIS_URL}: {exc}. Rate limiter will fail open.")
+        redis_client = None
 
 
 async def close_redis() -> None:
     global redis_client
     if redis_client is None:
         return
-    await redis_client.close()
+    try:
+        await redis_client.close()
+    except Exception as exc:
+        logger.warning(f"[rate_limiter] Error closing Redis: {exc}")
     redis_client = None
     logger.info("[rate_limiter] Redis connection closed")
 
@@ -56,25 +65,51 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         key = _build_client_key(request)
-        count = await redis_client.incr(key)
-        if count == 1:
-            await redis_client.expire(key, RATE_LIMIT_WINDOW_SECONDS)
+        now = time.time()
+        clear_before = now - RATE_LIMIT_WINDOW_SECONDS
 
-        remaining = max(0, RATE_LIMIT_MAX_REQUESTS - count)
-        if count > RATE_LIMIT_MAX_REQUESTS:
-            ttl = await redis_client.ttl(key)
-            headers = {
-                "Retry-After": str(ttl if ttl and ttl > 0 else RATE_LIMIT_WINDOW_SECONDS),
-                "X-RateLimit-Limit": str(RATE_LIMIT_MAX_REQUESTS),
-                "X-RateLimit-Remaining": "0",
-            }
-            return Response(
-                content="Too many requests. Please try again later.",
-                status_code=429,
-                headers=headers,
-            )
+        try:
+            # Atomic pipeline: clean expired hits, fetch count and oldest timestamp
+            pipe = redis_client.pipeline()
+            pipe.zremrangebyscore(key, 0, clear_before)
+            pipe.zcard(key)
+            pipe.zrange(key, 0, 0, withscores=True)
+            results = await pipe.execute()
 
-        response = await call_next(request)
-        response.headers["X-RateLimit-Limit"] = str(RATE_LIMIT_MAX_REQUESTS)
-        response.headers["X-RateLimit-Remaining"] = str(remaining)
-        return response
+            current_count = results[1]
+            oldest_items = results[2]
+
+            if current_count >= RATE_LIMIT_MAX_REQUESTS:
+                if oldest_items:
+                    oldest_ts = oldest_items[0][1]
+                    retry_after_sec = max(1, int(oldest_ts + RATE_LIMIT_WINDOW_SECONDS - now + 0.999))
+                else:
+                    retry_after_sec = RATE_LIMIT_WINDOW_SECONDS
+
+                headers = {
+                    "Retry-After": str(retry_after_sec),
+                    "X-RateLimit-Limit": str(RATE_LIMIT_MAX_REQUESTS),
+                    "X-RateLimit-Remaining": "0",
+                }
+                return Response(
+                    content="Too many requests. Please try again later.",
+                    status_code=429,
+                    headers=headers,
+                )
+
+            # Record current request in sliding window
+            member = f"{now}:{uuid.uuid4().hex}"
+            pipe = redis_client.pipeline()
+            pipe.zadd(key, {member: now})
+            pipe.expire(key, RATE_LIMIT_WINDOW_SECONDS)
+            await pipe.execute()
+
+            remaining = max(0, RATE_LIMIT_MAX_REQUESTS - (current_count + 1))
+            response = await call_next(request)
+            response.headers["X-RateLimit-Limit"] = str(RATE_LIMIT_MAX_REQUESTS)
+            response.headers["X-RateLimit-Remaining"] = str(remaining)
+            return response
+
+        except Exception as exc:
+            logger.warning(f"[rate_limiter] Redis error encountered: {exc}. Failing open.")
+            return await call_next(request)

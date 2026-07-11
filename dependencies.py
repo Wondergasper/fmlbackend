@@ -25,8 +25,9 @@ def require_role(allowed_roles: list[str]):
     """Enforces role-based permissions at the endpoint level"""
     async def dependency(user = Depends(get_current_user)):
         # Retrieve the user profile from database to verify the role
-        profile = supabase.table("profiles").select("role").eq("id", user.id).single().execute()
-        if not profile.data or profile.data.get("role") not in allowed_roles:
+        profile_res = supabase.table("profiles").select("role").eq("id", user.id).execute()
+        profile_data = profile_res.data[0] if profile_res.data else None
+        if not profile_data or profile_data.get("role") not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: Insufficient permissions for this resource"

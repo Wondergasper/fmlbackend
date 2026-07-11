@@ -10,6 +10,8 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Missing Supabase credentials in environment variables")
+if not SUPABASE_SERVICE_KEY:
+    raise ValueError("Missing SUPABASE_SERVICE_ROLE_KEY — admin operations will fail")
 
 # Public client for general actions
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
