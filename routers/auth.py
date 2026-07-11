@@ -2,12 +2,14 @@
 auth.py — Authentication routes for Farmers Market API
 
 Endpoints:
-  POST /auth/register  — Register a new user (customer or vendor)
-  POST /auth/login     — Login and receive a JWT access token
-  GET  /auth/me        — Get the current authenticated user's profile
-  POST /auth/logout    — Invalidate the current session
-  POST /auth/send-otp  — Send a 4-digit OTP code to the user's email
-  POST /auth/verify-otp — Verify a 4-digit OTP code and mark email as verified
+  POST /auth/register      — Register a new user (customer or vendor)
+  POST /auth/login         — Login and receive a JWT access token
+  GET  /auth/me            — Get the current authenticated user's profile
+  POST /auth/logout        — Invalidate the current session
+  POST /auth/send-otp      — Send a 4-digit OTP code to the user's email
+  POST /auth/verify-otp    — Verify a 4-digit OTP code and mark email as verified
+  POST /auth/forgot-password — Send password-reset OTP
+  POST /auth/reset-password  — Reset password using OTP
 """
 
 import os
@@ -16,13 +18,15 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from dependencies import get_current_user
+# Fix #1 — single source of truth: all routes use middleware.auth
+from middleware.auth import get_current_user
 from database import supabase, supabase_admin
 from services.email import (
     send_otp_email,
     send_welcome_customer,
     send_welcome_vendor,
     send_admin_new_vendor,
+    send_password_reset_email,
 )
 
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@farmconnect.ng")
@@ -45,6 +49,8 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    # Fix #2 — optional role the caller expects; returned role must match
+    expected_role: Optional[str] = None
 
 
 class GoogleLoginRequest(BaseModel):
@@ -69,6 +75,13 @@ async def register(payload: RegisterRequest):
             detail=f"Invalid role. Must be one of: {allowed_roles}"
         )
 
+    # Fix #6 — enforce minimum password length
+    if len(payload.password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 6 characters."
+        )
+
     # 1. Create the Supabase Auth user
     try:
         auth_res = supabase.auth.sign_up({
@@ -90,6 +103,7 @@ async def register(payload: RegisterRequest):
     user_id = auth_res.user.id
 
     # 2. Insert a profile row via the admin client (bypasses RLS)
+    # Fix #4 — vendors are Pending Approval; customers are Active immediately
     profile_data = {
         "id": user_id,
         "email": payload.email,
@@ -97,6 +111,8 @@ async def register(payload: RegisterRequest):
         "role": payload.role,
         "phone": payload.phone,
         "wallet_balance": 0,
+        "status": "Pending Approval" if payload.role == "vendor" else "Active",
+        "email_verified": False,
     }
     try:
         supabase_admin.table("profiles").insert(profile_data).execute()
@@ -129,6 +145,10 @@ async def login(payload: LoginRequest):
     """
     Authenticate a user with email/password.
     Returns the Supabase session object containing the access_token.
+
+    Fix #2 — If `expected_role` is provided, the actual DB role must match.
+    This prevents a customer from using the vendor/admin login pages to
+    gain a session that the frontend would treat as a privileged role.
     """
     try:
         auth_res = supabase.auth.sign_in_with_password({
@@ -150,7 +170,7 @@ async def login(payload: LoginRequest):
     # Fetch role from the profiles table (handle missing profile gracefully)
     profile_res = (
         supabase.table("profiles")
-        .select("role, full_name, wallet_balance")
+        .select("role, full_name, wallet_balance, status")
         .eq("id", auth_res.user.id)
         .execute()
     )
@@ -164,11 +184,21 @@ async def login(payload: LoginRequest):
                 "email": auth_res.user.email,
                 "full_name": auth_res.user.email.split("@")[0],
                 "role": "customer",
+                "status": "Active",
                 "wallet_balance": 0,
             }).execute()
-            profile_data = {"role": "customer", "full_name": auth_res.user.email.split("@")[0]}
+            profile_data = {"role": "customer", "full_name": auth_res.user.email.split("@")[0], "status": "Active"}
         except Exception as exc:
             print(f"[WARN] Auto-profile creation failed for {auth_res.user.id}: {exc}")
+
+    actual_role = profile_data.get("role") if profile_data else None
+
+    # Fix #2 — enforce role match when the caller specifies an expected role
+    if payload.expected_role and actual_role != payload.expected_role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied. This account does not have the '{payload.expected_role}' role."
+        )
 
     return {
         "access_token": auth_res.session.access_token,
@@ -176,8 +206,9 @@ async def login(payload: LoginRequest):
         "user": {
             "id": auth_res.user.id,
             "email": auth_res.user.email,
-            "role": profile_data.get("role") if profile_data else None,
+            "role": actual_role,
             "full_name": profile_data.get("full_name") if profile_data else None,
+            "status": profile_data.get("status") if profile_data else None,
         }
     }
 
@@ -206,7 +237,7 @@ async def get_me(user=Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
-# OTP Models
+# OTP / Password-Reset Models
 # ---------------------------------------------------------------------------
 
 class SendOtpRequest(BaseModel):
@@ -218,6 +249,16 @@ class VerifyOtpRequest(BaseModel):
     otp_code: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp_code: str
+    new_password: str
+
+
 # ---------------------------------------------------------------------------
 # OTP Endpoints
 # ---------------------------------------------------------------------------
@@ -225,8 +266,11 @@ class VerifyOtpRequest(BaseModel):
 @router.post("/send-otp", status_code=status.HTTP_200_OK)
 async def send_otp(payload: SendOtpRequest):
     """
-    Generate a 4-digit OTP, store it on the user's profile, and send it via email.
-    OTP expires after 10 minutes.
+    Generate a 4-digit OTP for email verification, store it on the user's
+    profile, and send it via email. OTP expires after 10 minutes.
+
+    Fix #7 — stores otp_purpose="email_verification" so that
+    password-reset codes cannot be used here and vice versa.
     """
     profile_res = (
         supabase_admin.table("profiles")
@@ -247,6 +291,7 @@ async def send_otp(payload: SendOtpRequest):
     supabase_admin.table("profiles").update({
         "otp_code": otp_code,
         "otp_expires_at": expires_at.isoformat(),
+        "otp_purpose": "email_verification",  # Fix #7
     }).eq("id", profile["id"]).execute()
 
     send_otp_email.delay(payload.email, profile["full_name"], otp_code)
@@ -258,10 +303,13 @@ async def send_otp(payload: SendOtpRequest):
 async def verify_otp(payload: VerifyOtpRequest):
     """
     Verify a 4-digit OTP code. Marks the email as verified on success.
+
+    Fix #7 — rejects codes that were issued for password-reset, not
+    email-verification, preventing cross-flow OTP reuse.
     """
     profile_res = (
         supabase_admin.table("profiles")
-        .select("id, full_name, otp_code, otp_expires_at, email_verified")
+        .select("id, full_name, otp_code, otp_expires_at, otp_purpose, email_verified")
         .eq("email", payload.email)
         .execute()
     )
@@ -280,6 +328,14 @@ async def verify_otp(payload: VerifyOtpRequest):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No OTP has been sent. Please request a new code."
+        )
+
+    # Fix #7 — reject if this OTP was issued for a different purpose
+    otp_purpose = profile.get("otp_purpose")
+    if otp_purpose and otp_purpose != "email_verification":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This code cannot be used for email verification. Please request a new code."
         )
 
     if stored_code != payload.otp_code:
@@ -301,9 +357,130 @@ async def verify_otp(payload: VerifyOtpRequest):
         "email_verified": True,
         "otp_code": None,
         "otp_expires_at": None,
+        "otp_purpose": None,
     }).eq("id", profile["id"]).execute()
 
     return {"message": "Email verified successfully.", "email": payload.email, "verified": True}
+
+
+# ---------------------------------------------------------------------------
+# Password Reset Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/forgot-password", status_code=status.HTTP_200_OK)
+async def forgot_password(payload: ForgotPasswordRequest):
+    """
+    Initiate a password reset by sending a 6-digit OTP to the user's email.
+
+    Always returns 200 regardless of whether the email is registered,
+    to prevent email enumeration.
+    """
+    profile_res = (
+        supabase_admin.table("profiles")
+        .select("id, full_name")
+        .eq("email", payload.email)
+        .execute()
+    )
+    profile = profile_res.data[0] if profile_res.data else None
+
+    if profile:
+        otp_code = f"{random.randint(0, 999999):06d}"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+        supabase_admin.table("profiles").update({
+            "otp_code": otp_code,
+            "otp_expires_at": expires_at.isoformat(),
+            "otp_purpose": "password_reset",  # Fix #7
+        }).eq("id", profile["id"]).execute()
+
+        send_password_reset_email.delay(
+            payload.email,
+            profile["full_name"] or "User",
+            otp_code,
+        )
+
+    # Always return the same response to avoid email enumeration
+    return {"message": "If an account exists with that email, a reset code has been sent."}
+
+
+@router.post("/reset-password", status_code=status.HTTP_200_OK)
+async def reset_password(payload: ResetPasswordRequest):
+    """
+    Reset the user's password using a valid OTP.
+
+    Validates the 6-digit OTP, then updates the password via the Supabase
+    admin client (bypasses the need for the user's current password).
+    """
+    profile_res = (
+        supabase_admin.table("profiles")
+        .select("id, otp_code, otp_expires_at, otp_purpose")
+        .eq("email", payload.email)
+        .execute()
+    )
+    profile = profile_res.data[0] if profile_res.data else None
+
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account found with this email."
+        )
+
+    stored_code = profile.get("otp_code")
+    if not stored_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No reset code has been requested. Please start the forgot-password flow."
+        )
+
+    # Fix #7 — reject if this OTP was issued for email-verification, not reset
+    otp_purpose = profile.get("otp_purpose")
+    if otp_purpose and otp_purpose != "password_reset":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This code cannot be used for a password reset. Please request a new reset code."
+        )
+
+    if stored_code != payload.otp_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incorrect reset code."
+        )
+
+    expires_at = profile.get("otp_expires_at")
+    if expires_at:
+        expires_dt = datetime.fromisoformat(expires_at)
+        if expires_dt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset code has expired. Please request a new one."
+            )
+
+    if len(payload.new_password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 6 characters."
+        )
+
+    # Update password via Supabase admin API
+    try:
+        supabase_admin.auth.admin.update_user_by_id(
+            profile["id"],
+            {"password": payload.new_password},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update password: {str(e)}"
+        )
+
+    # Invalidate the OTP after successful reset
+    supabase_admin.table("profiles").update({
+        "otp_code": None,
+        "otp_expires_at": None,
+        "otp_purpose": None,
+    }).eq("id", profile["id"]).execute()
+
+    return {"message": "Password updated successfully. You can now log in with your new password."}
 
 
 @router.post("/logout")

@@ -900,3 +900,66 @@ def send_weekly_vendor_digest(
         f"📊 Your Farm-Connect summary — {week}",
         _base_html("Weekly Digest", body),
     )
+
+
+# ---------------------------------------------------------------------------
+# Password Reset
+# ---------------------------------------------------------------------------
+
+@celery_app.task(name="send_password_reset_email")
+def send_password_reset_email(to_email: str, full_name: str, otp_code: str) -> None:
+    """
+    Send a password-reset OTP email.
+
+    Args:
+        to_email:  Recipient's email address.
+        full_name: Recipient's display name.
+        otp_code:  6-digit one-time code (valid for 15 minutes).
+    """
+    body = f"""
+    <h2 style="margin:0 0 4px;color:{COLOR_DARK};font-size:22px;font-weight:800;">
+      🔐 Reset Your Password
+    </h2>
+    <p style="margin:0 0 20px;color:{COLOR_MUTED};font-size:14px;">
+      Hi {full_name}, we received a request to reset your Farm-Connect password.
+      Use the code below — it expires in <strong>15 minutes</strong>.
+    </p>
+
+    <!-- OTP block -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="margin:0 0 24px;">
+      <tr>
+        <td align="center">
+          <div style="display:inline-block;background-color:{COLOR_ACCENT};
+                      border:2px dashed {COLOR_SECONDARY};border-radius:16px;
+                      padding:20px 40px;">
+            <p style="margin:0 0 4px;color:{COLOR_MUTED};font-size:12px;
+                      font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">
+              Your reset code
+            </p>
+            <p style="margin:0;color:{COLOR_DARK};font-size:42px;font-weight:900;
+                      letter-spacing:0.18em;font-family:monospace;">
+              {otp_code}
+            </p>
+          </div>
+        </td>
+      </tr>
+    </table>
+
+    {_info_table(
+        _info_row("⏰ Expires in:", "15 minutes"),
+        _info_row("📧 Sent to:", to_email),
+    )}
+
+    <p style="margin:20px 0 8px;color:{COLOR_MUTED};font-size:13px;line-height:1.6;">
+      If you didn't request a password reset, you can safely ignore this email.
+      Your password will <strong>not</strong> change unless you use the code above.
+    </p>
+
+    {_btn("Reset My Password →", FRONTEND_URL + "/reset-password")}
+    """
+    send_email(
+        to_email,
+        "🔐 Your Farm-Connect Password Reset Code",
+        _base_html("Password Reset", body),
+    )
