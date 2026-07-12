@@ -112,7 +112,7 @@ async def register(payload: RegisterRequest):
         "phone": payload.phone,
         "wallet_balance": 0,
         "status": "Pending Approval" if payload.role == "vendor" else "Active",
-        "email_verified": False,
+        "email_verified": True,  # Email disabled mode: auto-verify on registration
     }
     try:
         supabase_admin.table("profiles").insert(profile_data).execute()
@@ -393,11 +393,12 @@ async def forgot_password(payload: ForgotPasswordRequest):
             "otp_purpose": "password_reset",  # Fix #7
         }).eq("id", profile["id"]).execute()
 
-        send_password_reset_email.delay(
-            payload.email,
-            profile["full_name"] or "User",
-            otp_code,
-        )
+        # Email disabled mode: skip sending email, return OTP directly
+        # TODO: remove 'otp_code' from response once email is configured
+        return {
+            "message": "Email sending is currently disabled. Use the code below to reset your password.",
+            "otp_code": otp_code,
+        }
 
     # Always return the same response to avoid email enumeration
     return {"message": "If an account exists with that email, a reset code has been sent."}

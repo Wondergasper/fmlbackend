@@ -906,7 +906,7 @@ def send_weekly_vendor_digest(
 # Password Reset
 # ---------------------------------------------------------------------------
 
-@celery_app.task(name="send_password_reset_email")
+@celery_app.task(name="send_password_reset_email", autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
 def send_password_reset_email(to_email: str, full_name: str, otp_code: str) -> None:
     """
     Send a password-reset OTP email.
