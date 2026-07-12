@@ -267,20 +267,32 @@ def send_email(to: str, subject: str, html: str) -> None:
     if not to:
         logger.warning("[email] Skipped — no recipient address provided.")
         return
-    try:
-        if RESEND_API_KEY:
-            _send_via_resend(to, subject, html)
-            logger.info(f"[email] Resend ✓  to={to}  subject={subject!r}")
-        elif SENDGRID_API_KEY:
-            _send_via_sendgrid(to, subject, html)
-            logger.info(f"[email] SendGrid ✓  to={to}  subject={subject!r}")
-        elif SMTP_USER:
-            _send_via_smtp(to, subject, html)
-            logger.info(f"[email] SMTP ✓  to={to}  subject={subject!r}")
-        else:
-            logger.warning(f"[email] No transport configured — would send to={to}  subject={subject!r}")
-    except Exception as exc:
-        logger.error(f"[email] FAILED  to={to}  subject={subject!r}  error={exc}")
+
+    transports = []
+    # Skip default placeholder keys
+    if RESEND_API_KEY and not RESEND_API_KEY.startswith("replace-") and not RESEND_API_KEY.startswith("re_replace-"):
+        transports.append(("Resend", _send_via_resend))
+    if SENDGRID_API_KEY and not SENDGRID_API_KEY.startswith("replace-") and not SENDGRID_API_KEY.startswith("SG.replace-"):
+        transports.append(("SendGrid", _send_via_sendgrid))
+    if SMTP_USER and not SMTP_USER.startswith("your@") and not SMTP_USER.startswith("replace-"):
+        transports.append(("SMTP", _send_via_smtp))
+
+    if not transports:
+        logger.warning(f"[email] No transport configured — would send to={to}  subject={subject!r}")
+        return
+
+    errors = []
+    for name, send_fn in transports:
+        try:
+            send_fn(to, subject, html)
+            logger.info(f"[email] {name} ✓  to={to}  subject={subject!r}")
+            return
+        except Exception as exc:
+            logger.warning(f"[email] {name} failed for to={to}  subject={subject!r}: {exc}")
+            errors.append(f"{name}: {exc}")
+
+    logger.error(f"[email] FAILED all transports. to={to}  subject={subject!r}  errors={', '.join(errors)}")
+
 
 
 # ===========================================================================

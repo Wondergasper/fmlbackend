@@ -110,11 +110,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             await pipe.execute()
 
             remaining = max(0, RATE_LIMIT_MAX_REQUESTS - (current_count + 1))
-            response = await call_next(request)
-            response.headers["X-RateLimit-Limit"] = str(RATE_LIMIT_MAX_REQUESTS)
-            response.headers["X-RateLimit-Remaining"] = str(remaining)
-            return response
-
         except Exception as exc:
             logger.warning(f"[rate_limiter] Redis error encountered: {exc}. Failing open.")
             return await call_next(request)
+
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(RATE_LIMIT_MAX_REQUESTS)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        return response
+
