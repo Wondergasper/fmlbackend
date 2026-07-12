@@ -13,6 +13,7 @@ Endpoints:
 """
 
 import os
+import logging
 import random
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -21,6 +22,8 @@ from typing import Optional
 # Fix #1 — single source of truth: all routes use middleware.auth
 from middleware.auth import get_current_user
 from database import supabase, supabase_admin
+
+logger = logging.getLogger(__name__)
 from services.email import (
     send_otp_email,
     send_welcome_customer,
@@ -101,6 +104,17 @@ async def register(payload: RegisterRequest):
         )
 
     user_id = auth_res.user.id
+
+    # 1b. Auto-confirm the email so the user can log in immediately.
+    #     Supabase blocks sign_in_with_password until email_confirmed_at is set.
+    #     Since our email transport is not yet fully active, we confirm server-side.
+    try:
+        supabase_admin.auth.admin.update_user_by_id(
+            user_id,
+            {"email_confirm": True}
+        )
+    except Exception as e:
+        logger.warning(f"[auth] Could not auto-confirm email for {user_id}: {e}")
 
     # 2. Insert a profile row via the admin client (bypasses RLS)
     # Fix #4 — vendors are Pending Approval; customers are Active immediately
