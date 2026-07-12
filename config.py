@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
 
     # Redis
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://red-d52sksogjchc738njoug:6379"
     rate_limit_window_seconds: int = 60
     rate_limit_max_requests: int = 100
 
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # App
     environment: str = "development"
     app_name: str = "Farmers Market API"
-    cors_origins: str = "https://farmermarket-brown.vercel.app,http://localhost:5173"
+    cors_origins: str = "https://farmermarket-brown.vercel.app,https://farmermarket-git-cold-gasper-wonders-projects.vercel.app,http://localhost:5173"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
