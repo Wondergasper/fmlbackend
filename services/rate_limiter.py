@@ -59,6 +59,10 @@ async def close_redis() -> None:
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Always pass OPTIONS (CORS preflight) through — never rate-limit them
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         if any(request.url.path.startswith(path) for path in RATE_LIMIT_EXCLUDED_PATHS):
             return await call_next(request)
 

@@ -112,7 +112,9 @@ async def register(payload: RegisterRequest):
         "phone": payload.phone,
         "wallet_balance": 0,
         "status": "Pending Approval" if payload.role == "vendor" else "Active",
-        "email_verified": True,  # Email disabled mode: auto-verify on registration
+        # NOTE: email_verified is set via /auth/verify-otp once the column
+        # exists in the Supabase profiles table. Add it here after running:
+        # ALTER TABLE profiles ADD COLUMN email_verified BOOLEAN DEFAULT FALSE;
     }
     try:
         supabase_admin.table("profiles").insert(profile_data).execute()

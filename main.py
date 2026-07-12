@@ -124,8 +124,13 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
-# CORS — allow the Vite dev client and production frontend
+# Middleware — ORDER MATTERS: last added = outermost = runs first on request
 # ---------------------------------------------------------------------------
+# 1️⃣  RateLimitMiddleware is added first → it runs second (inside CORS layer)
+app.add_middleware(RateLimitMiddleware)
+
+# 2️⃣  CORSMiddleware is added last → it is outermost → handles OPTIONS preflights
+#     before any other middleware sees the request.  This fixes the 400 on OPTIONS.
 cors_origins = [o.strip() for o in settings.cors_origins.split(",")]
 app.add_middleware(
     CORSMiddleware,
@@ -134,8 +139,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.add_middleware(RateLimitMiddleware)
 
 # ---------------------------------------------------------------------------
 # Routers
