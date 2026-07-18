@@ -380,10 +380,11 @@ async def get_order(order_id: str, user=Depends(get_current_user)):
 async def update_order_status(
     order_id: str,
     payload: OrderStatusUpdate,
-    user=Depends(require_role(["vendor", "admin"]))
+    user=Depends(require_role(["customer", "vendor", "admin"]))
 ):
     """
     Update the status of an order.
+    Customers can cancel their own orders if they are still 'Processing'.
     Vendors can move orders through: Processing → In Transit → Delivered
     Admins can set any status including Cancelled.
     """
@@ -394,11 +395,34 @@ async def update_order_status(
             detail=f"Invalid status. Must be one of: {allowed_statuses}"
         )
 
-    # Verify vendor has products in this order (if not admin)
+    # Fetch caller role
     profile_res = supabase.table("profiles").select("role").eq("id", user.id).execute()
     profile_data = profile_res.data[0] if profile_res.data else None
     role = profile_data.get("role") if profile_data else "customer"
-    if role == "vendor":
+
+    # Fetch order to verify ownership and current status
+    order_check = supabase_admin.table("orders").select("customer_id, status").eq("id", order_id).execute()
+    if not order_check.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found.")
+    db_order = order_check.data[0]
+
+    if role == "customer":
+        if db_order.get("customer_id") != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only update your own orders."
+            )
+        if payload.status != "Cancelled":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Customers can only cancel orders."
+            )
+        if db_order.get("status") != "Processing":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Orders can only be cancelled while they are Processing."
+            )
+    elif role == "vendor":
         vendor_check = (
             supabase.table("order_items")
             .select("id, products!inner(vendor_id)")

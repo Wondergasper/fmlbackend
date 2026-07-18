@@ -10,5 +10,6 @@ Do NOT add new logic here — add it to middleware/auth.py instead.
 """
 
 from middleware.auth import get_current_user, require_role, require_any_role
+from database import supabase, supabase_admin
 
-__all__ = ["get_current_user", "require_role", "require_any_role"]
+__all__ = ["get_current_user", "require_role", "require_any_role", "supabase", "supabase_admin"]

@@ -78,8 +78,9 @@ def require_role(allowed_roles: list[str] | str):
         roles_set = set(allowed_roles)
 
     async def dependency(user=Depends(get_current_user)):
+        import dependencies
         profile_res = (
-            supabase.table("profiles")
+            dependencies.supabase.table("profiles")
             .select("role")
             .eq("id", user.id)
             .execute()
