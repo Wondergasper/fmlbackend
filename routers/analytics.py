@@ -154,14 +154,35 @@ async def get_vendor_performance(user=Depends(require_role(["admin"]))):
     result = []
     for v in vendors:
         vid = v["id"]
-        orders_res = (
-            supabase.table("orders")
-            .select("total_kobo")
-            .eq("vendor_id", vid)
-            .eq("payment_status", "Paid")
-            .execute()
-        )
-        revenue_kobo = sum(o.get("total_kobo", 0) for o in (orders_res.data or []))
+        revenue_kobo = 0
+        try:
+            items_res = (
+                supabase.table("order_items")
+                .select("quantity, unit_price_kobo, orders!inner(payment_status), products!inner(vendor_id)")
+                .eq("products.vendor_id", vid)
+                .eq("orders.payment_status", "Paid")
+                .execute()
+            )
+            for item in (items_res.data or []):
+                qty = item.get("quantity", 0)
+                price = item.get("unit_price_kobo", 0)
+                revenue_kobo += qty * price
+        except Exception as exc:
+            logger.warning(f"[analytics] Error calculating revenue for vendor {vid}: {exc}")
+            # Fallback query attempt
+            try:
+                orders_res = (
+                    supabase.table("orders")
+                    .select("id, order_items!inner(quantity, unit_price_kobo, products!inner(vendor_id))")
+                    .eq("order_items.products.vendor_id", vid)
+                    .eq("payment_status", "Paid")
+                    .execute()
+                )
+                for o in (orders_res.data or []):
+                    for it in (o.get("order_items") or []):
+                        revenue_kobo += it.get("quantity", 0) * it.get("unit_price_kobo", 0)
+            except Exception:
+                pass
         result.append({
             "id": vid,
             "name": v.get("display_name") or v.get("full_name", "Unknown"),

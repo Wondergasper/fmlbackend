@@ -51,6 +51,18 @@ def _public_url(path: str) -> str:
     return f"{supabase_url}/storage/v1/object/public/{BUCKET}/{path}"
 
 
+def ensure_storage_bucket(bucket_name: str, public: bool = True) -> None:
+    """Ensure that the required Supabase Storage bucket exists, auto-creating it if needed."""
+    try:
+        buckets = supabase_admin.storage.list_buckets()
+        existing_names = [b.name if hasattr(b, "name") else b.get("name") for b in buckets] if buckets else []
+        if bucket_name not in existing_names:
+            supabase_admin.storage.create_bucket(bucket_name, options={"public": public})
+    except Exception:
+        # Ignore error if bucket already exists or permissions don't allow listing
+        pass
+
+
 def _path_from_url(public_url: str) -> str | None:
     """Extract the storage path from a public URL so we can delete it."""
     marker = f"/object/public/{BUCKET}/"
@@ -118,9 +130,9 @@ def _normalize_storage_path(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 @router.post("/image", status_code=status.HTTP_201_CREATED)
-async def upload_product_image(
+async def upload_image(
     file: UploadFile = File(..., description="JPEG, PNG, or WebP image — max 5 MB"),
-    user=Depends(require_role(["vendor", "admin"])),
+    user=Depends(require_role(["vendor", "admin", "courier", "rider", "driver"])),
 ):
     """
     Upload a product image to Supabase Storage.
@@ -160,6 +172,7 @@ async def upload_product_image(
         # ── Upload to Supabase Storage ──────────────────────────────────────────
         storage_path = _build_storage_path(str(user.id), content_type)
         try:
+            ensure_storage_bucket(BUCKET, public=True)
             supabase_admin.storage.from_(BUCKET).upload(
                 path=storage_path,
                 file=file_bytes,

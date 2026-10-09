@@ -128,6 +128,88 @@ class OrderConnectionManager:
         for ws in dead_sockets:
             self.disconnect_vendor(vendor_id, ws)
 
+    async def connect_rider(self, rider_id: str, websocket: WebSocket):
+        await websocket.accept()
+        async with self.lock:
+            key = f"rider:{rider_id}"
+            if key not in self.active_connections:
+                self.active_connections[key] = set()
+            self.active_connections[key].add(websocket)
+            if "riders_pool" not in self.active_connections:
+                self.active_connections["riders_pool"] = set()
+            self.active_connections["riders_pool"].add(websocket)
+
+    def disconnect_rider(self, rider_id: str, websocket: WebSocket):
+        with self._thread_lock:
+            key = f"rider:{rider_id}"
+            if key in self.active_connections:
+                self.active_connections[key].discard(websocket)
+                if not self.active_connections[key]:
+                    del self.active_connections[key]
+            if "riders_pool" in self.active_connections:
+                self.active_connections["riders_pool"].discard(websocket)
+                if not self.active_connections["riders_pool"]:
+                    del self.active_connections["riders_pool"]
+
+    async def broadcast_to_riders(self, message: dict):
+        """Broadcast message to all connected delivery riders."""
+        async with self.lock:
+            if "riders_pool" not in self.active_connections:
+                return
+            active = list(self.active_connections["riders_pool"])
+
+        if not active:
+            return
+
+        results = await asyncio.gather(
+            *[connection.send_json(message) for connection in active],
+            return_exceptions=True
+        )
+
+        dead_sockets = set()
+        for connection, result in zip(active, results):
+            if isinstance(result, Exception):
+                logger.warning(f"[ws] Error sending to rider socket: {result}")
+                dead_sockets.add(connection)
+
+        for ws in dead_sockets:
+            with self._thread_lock:
+                if "riders_pool" in self.active_connections:
+                    self.active_connections["riders_pool"].discard(ws)
+
+    async def broadcast_new_delivery_offer(self, offer_data: dict):
+        """Alert all connected couriers of a new delivery offer."""
+        payload = {
+            "type": "NEW_OFFER",
+            "event": "NEW_OFFER",
+            "data": offer_data,
+        }
+        await self.broadcast_to_riders(payload)
+
+    async def broadcast_task_assigned(self, task_data: dict):
+        """Notify couriers and order subscribers when an offer is accepted/assigned."""
+        payload = {
+            "type": "TASK_ASSIGNED",
+            "event": "TASK_ASSIGNED",
+            "data": task_data,
+        }
+        order_id = task_data.get("order_id") or task_data.get("id")
+        if order_id:
+            await self.broadcast_to_order(order_id, payload)
+        await self.broadcast_to_riders(payload)
+
+    async def broadcast_order_updated(self, order_id: str, status: str, metadata: dict = None):
+        """Broadcast order updates to order subscribers and couriers."""
+        payload = {
+            "type": "ORDER_UPDATED",
+            "event": "ORDER_UPDATED",
+            "order_id": order_id,
+            "status": status,
+            "data": metadata or {},
+        }
+        await self.broadcast_to_order(order_id, payload)
+        await self.broadcast_to_riders(payload)
+
     async def start_redis_listener(self):
         """
         Listen for multi-instance pub/sub events via Redis if available.

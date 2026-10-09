@@ -300,6 +300,21 @@ async def place_order(
                 extra_data={"total_kobo": total_kobo + delivery_fee}
             )
 
+        # Broadcast new delivery offer to online couriers via WebSocket
+        try:
+            await connection_manager.broadcast_new_delivery_offer({
+                "id": f"task-{order_id[:8]}",
+                "orderId": order_id,
+                "order_id": order_id,
+                "customerAddress": payload.delivery_address,
+                "deliveryType": payload.delivery_type,
+                "itemsCount": len(payload.items),
+                "payoutKobo": 125000,
+                "status": "available",
+            })
+        except Exception as ws_err:
+            logger.warning(f"[orders] Courier offer broadcast warning: {ws_err}")
+
     return {
         "message": "Order placed successfully.",
         "order_id": order_id,

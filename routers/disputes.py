@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from dependencies import get_current_user, require_role
 from database import supabase, supabase_admin
-from routers.uploads import _validate_image_bytes, _MAGIC
+from routers.uploads import _validate_image_bytes, _MAGIC, ensure_storage_bucket
 
 # Extend allowed types for dispute evidence to include PDF
 _EVIDENCE_MAGIC: dict[str, list[tuple[int, bytes]]] = {
@@ -382,6 +382,7 @@ async def add_dispute_evidence(
                 )
 
         try:
+            ensure_storage_bucket(DISPUTE_BUCKET, public=True)
             supabase_admin.storage.from_(DISPUTE_BUCKET).upload(
                 path=storage_path,
                 file=file_bytes,

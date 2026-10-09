@@ -22,8 +22,64 @@ from typing import Optional
 # Fix #1 — single source of truth: all routes use middleware.auth
 from middleware.auth import get_current_user
 from database import supabase, supabase_admin
+from config import settings
+from services import rate_limiter as _rate_limiter
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# OTP brute-force protection (Redis-backed; fails open if Redis unavailable)
+# ---------------------------------------------------------------------------
+OTP_MAX_ATTEMPTS = 5
+OTP_ATTEMPT_WINDOW_SECONDS = 15 * 60  # 15 minutes
+
+
+def _otp_redis_client():
+    return _rate_limiter.redis_client
+
+
+def _otp_attempt_key(email: str, purpose: str) -> str:
+    return f"otp_attempts:{purpose}:{email}"
+
+
+def _check_otp_attempts(email: str, purpose: str) -> None:
+    """Raise 429 if this email has exceeded the OTP attempt limit."""
+    client = _otp_redis_client()
+    if client is None:
+        return
+    try:
+        val = client.get(_otp_attempt_key(email, purpose))
+        if val and int(val) >= OTP_MAX_ATTEMPTS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many incorrect attempts. Request a new code and try again later.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+
+def _register_otp_failure(email: str, purpose: str) -> None:
+    client = _otp_redis_client()
+    if client is None:
+        return
+    try:
+        key = _otp_attempt_key(email, purpose)
+        client.incr(key)
+        client.expire(key, OTP_ATTEMPT_WINDOW_SECONDS)
+    except Exception:
+        pass
+
+
+def _clear_otp_attempts(email: str, purpose: str) -> None:
+    client = _otp_redis_client()
+    if client is None:
+        return
+    try:
+        client.delete(_otp_attempt_key(email, purpose))
+    except Exception:
+        pass
 from services.email import (
     send_otp_email,
     send_welcome_customer,
@@ -61,6 +117,10 @@ class GoogleLoginRequest(BaseModel):
     role: str = "customer"  # Used only when the account is brand-new
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -71,7 +131,7 @@ async def register(payload: RegisterRequest):
     Register a new customer or vendor account.
     Creates the Supabase Auth user, then inserts a profile row.
     """
-    allowed_roles = {"customer", "vendor"}
+    allowed_roles = {"customer", "vendor", "logist", "rider", "courier", "driver"}
     if payload.role not in allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -117,24 +177,21 @@ async def register(payload: RegisterRequest):
         logger.warning(f"[auth] Could not auto-confirm email for {user_id}: {e}")
 
     # 2. Insert a profile row via the admin client (bypasses RLS)
-    # Fix #4 — vendors are Pending Approval; customers are Active immediately
+    # Database check constraint allows: 'customer', 'vendor', 'admin', 'driver', 'courier'
+    db_role = "courier" if payload.role in ("rider", "courier", "driver", "logist") else payload.role
     profile_data = {
         "id": user_id,
         "email": payload.email,
         "full_name": payload.full_name,
-        "role": payload.role,
+        "role": db_role,
         "phone": payload.phone,
         "wallet_balance": 0,
         "status": "Pending Approval" if payload.role == "vendor" else "Active",
-        # NOTE: email_verified is set via /auth/verify-otp once the column
-        # exists in the Supabase profiles table. Add it here after running:
-        # ALTER TABLE profiles ADD COLUMN email_verified BOOLEAN DEFAULT FALSE;
     }
     try:
         supabase_admin.table("profiles").insert(profile_data).execute()
     except Exception as e:
-        # Auth user created but profile failed — log and continue
-        print(f"[WARN] Profile insert failed for {user_id}: {e}")
+        logger.warning(f"[auth] Profile insert failed for {user_id}: {e}")
 
     # ── Email notifications ────────────────────────────────────────────────
     if payload.role == "customer":
@@ -177,15 +234,41 @@ async def login(payload: LoginRequest):
             detail=f"Login failed: {str(e)}"
         )
 
+    # No session returned usually means the password was accepted but the
+    # account's email is NOT confirmed in Supabase (it does not raise).
+    # In development we auto-confirm so the user isn't blocked; in production
+    # we surface a clear, actionable error instead of "Invalid credentials".
     if not auth_res.session:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials."
-        )
+        user_obj = getattr(auth_res, "user", None)
+        unconfirmed = bool(user_obj) and not getattr(user_obj, "email_confirmed_at", None)
+
+        if unconfirmed and settings.environment != "production":
+            try:
+                supabase_admin.auth.admin.update_user_by_id(
+                    user_obj.id, {"email_confirm": True}
+                )
+                auth_res = supabase.auth.sign_in_with_password({
+                    "email": payload.email,
+                    "password": payload.password,
+                })
+            except Exception as exc:
+                logger.warning(f"[auth] Dev auto-confirm + re-login failed for {payload.email}: {exc}")
+
+        if not auth_res.session:
+            if unconfirmed:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Email not verified. Check your inbox for the verification code, "
+                           "or use 'Forgot password' to verify your account.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials."
+            )
 
     # Fetch role from the profiles table (handle missing profile gracefully)
     profile_res = (
-        supabase.table("profiles")
+        supabase_admin.table("profiles")
         .select("role, full_name, wallet_balance, status")
         .eq("id", auth_res.user.id)
         .execute()
@@ -210,14 +293,19 @@ async def login(payload: LoginRequest):
     actual_role = profile_data.get("role") if profile_data else None
 
     # Fix #2 — enforce role match when the caller specifies an expected role
-    if payload.expected_role and actual_role != payload.expected_role:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied. This account does not have the '{payload.expected_role}' role."
-        )
+    if payload.expected_role:
+        expected = payload.expected_role
+        courier_roles = {"rider", "courier", "driver", "logist"}
+        roles_match = (actual_role == expected) or (expected in courier_roles and actual_role in courier_roles)
+        if not roles_match:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied. This account does not have the '{payload.expected_role}' role."
+            )
 
     return {
         "access_token": auth_res.session.access_token,
+        "refresh_token": auth_res.session.refresh_token,
         "token_type": "bearer",
         "user": {
             "id": auth_res.user.id,
@@ -236,7 +324,7 @@ async def get_me(user=Depends(get_current_user)):
     Requires a valid Bearer token in the Authorization header.
     """
     profile_res = (
-        supabase.table("profiles")
+        supabase_admin.table("profiles")
         .select("*")
         .eq("id", user.id)
         .execute()
@@ -250,6 +338,41 @@ async def get_me(user=Depends(get_current_user)):
         )
 
     return profile_data
+
+
+class ProfileUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    display_name: Optional[str] = None
+    bio: Optional[str] = None
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+    delivery_address: Optional[str] = None
+
+
+@router.patch("/profile", status_code=status.HTTP_200_OK)
+async def update_profile(
+    payload: ProfileUpdateRequest,
+    user=Depends(get_current_user),
+):
+    """
+    Update the authenticated user's own profile details.
+    """
+    update_data = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields provided to update.",
+        )
+
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = supabase_admin.table("profiles").update(update_data).eq("id", user.id).execute()
+    if not res.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User profile not found.",
+        )
+
+    return {"message": "Profile updated successfully.", "data": res.data[0]}
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +424,7 @@ async def send_otp(payload: SendOtpRequest):
             detail="No account found with this email."
         )
 
-    otp_code = f"{random.randint(0, 9999):04d}"
+    otp_code = f"{random.randint(0, 999999):06d}"
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
 
     supabase_admin.table("profiles").update({
@@ -310,9 +433,16 @@ async def send_otp(payload: SendOtpRequest):
         "otp_purpose": "email_verification",  # Fix #7
     }).eq("id", profile["id"]).execute()
 
+    # Best-effort email (fails open — see email.py). When no email domain is
+    # verified (dev), the OTP is also returned directly so the caller can
+    # proceed without relying on delivery.
     send_otp_email.delay(payload.email, profile["full_name"], otp_code)
 
-    return {"message": "OTP sent to your email.", "email": payload.email}
+    result = {"message": "OTP generated.", "email": payload.email}
+    if settings.environment != "production":
+        result["otp_code"] = otp_code
+        result["note"] = "Email delivery requires a verified domain; use otp_code above for dev."
+    return result
 
 
 @router.post("/verify-otp", status_code=status.HTTP_200_OK)
@@ -336,6 +466,8 @@ async def verify_otp(payload: VerifyOtpRequest):
             detail="No account found with this email."
         )
 
+    _check_otp_attempts(payload.email, "email_verification")
+
     if profile.get("email_verified"):
         return {"message": "Email already verified.", "email": payload.email, "verified": True}
 
@@ -355,6 +487,7 @@ async def verify_otp(payload: VerifyOtpRequest):
         )
 
     if stored_code != payload.otp_code:
+        _register_otp_failure(payload.email, "email_verification")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Incorrect verification code."
@@ -364,6 +497,7 @@ async def verify_otp(payload: VerifyOtpRequest):
     if expires_at:
         expires_dt = datetime.fromisoformat(expires_at)
         if expires_dt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            _register_otp_failure(payload.email, "email_verification")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="OTP has expired. Please request a new code."
@@ -375,6 +509,17 @@ async def verify_otp(payload: VerifyOtpRequest):
         "otp_expires_at": None,
         "otp_purpose": None,
     }).eq("id", profile["id"]).execute()
+
+    _clear_otp_attempts(payload.email, "email_verification")
+
+    # Align Supabase Auth's email confirmation with our app flag so that login
+    # (which gates on Supabase email_confirmed_at) works in production too.
+    try:
+        supabase_admin.auth.admin.update_user_by_id(
+            profile["id"], {"email_confirm": True}
+        )
+    except Exception as exc:
+        logger.warning(f"[auth] Could not confirm Supabase email for {profile['id']}: {exc}")
 
     return {"message": "Email verified successfully.", "email": payload.email, "verified": True}
 
@@ -409,12 +554,16 @@ async def forgot_password(payload: ForgotPasswordRequest):
             "otp_purpose": "password_reset",  # Fix #7
         }).eq("id", profile["id"]).execute()
 
-        # Email disabled mode: skip sending email, return OTP directly
-        # TODO: remove 'otp_code' from response once email is configured
-        return {
-            "message": "Email sending is currently disabled. Use the code below to reset your password.",
-            "otp_code": otp_code,
-        }
+        # Dispatch password reset email via Celery
+        try:
+            from services.email import send_password_reset_email
+            send_password_reset_email.delay(
+                payload.email,
+                profile.get("full_name") or "User",
+                otp_code,
+            )
+        except Exception as exc:
+            logger.warning(f"[auth] Failed to queue password reset email: {exc}")
 
     # Always return the same response to avoid email enumeration
     return {"message": "If an account exists with that email, a reset code has been sent."}
@@ -439,8 +588,10 @@ async def reset_password(payload: ResetPasswordRequest):
     if not profile:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No account found with this email."
+            detail="No account found with that email."
         )
+
+    _check_otp_attempts(payload.email, "password_reset")
 
     stored_code = profile.get("otp_code")
     if not stored_code:
@@ -458,6 +609,7 @@ async def reset_password(payload: ResetPasswordRequest):
         )
 
     if stored_code != payload.otp_code:
+        _register_otp_failure(payload.email, "password_reset")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Incorrect reset code."
@@ -467,6 +619,7 @@ async def reset_password(payload: ResetPasswordRequest):
     if expires_at:
         expires_dt = datetime.fromisoformat(expires_at)
         if expires_dt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            _register_otp_failure(payload.email, "password_reset")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Reset code has expired. Please request a new one."
@@ -497,18 +650,48 @@ async def reset_password(payload: ResetPasswordRequest):
         "otp_purpose": None,
     }).eq("id", profile["id"]).execute()
 
+    _clear_otp_attempts(payload.email, "password_reset")
+
     return {"message": "Password updated successfully. You can now log in with your new password."}
+
+
+@router.post("/refresh", tags=["auth"])
+async def refresh_token(payload: RefreshRequest):
+    """
+    Exchange a Supabase refresh_token for a new session (access + refresh).
+    Keeps the user logged in past the ~1h access-token expiry without
+    forcing a full re-login.
+    """
+    try:
+        auth_res = supabase.auth.refresh_session(payload.refresh_token)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Session refresh failed: {str(e)}"
+        )
+    if not auth_res.session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session."
+        )
+    return {
+        "access_token": auth_res.session.access_token,
+        "refresh_token": auth_res.session.refresh_token,
+        "token_type": "bearer",
+    }
 
 
 @router.post("/logout")
 async def logout(user=Depends(get_current_user)):
     """
-    Sign the current user out (invalidates the session on Supabase).
+    Sign the current user out. Revokes all of the user's Supabase sessions so
+    the stateless JWT cannot be reused after logout (otherwise it stays valid
+    until it expires, ~1h).
     """
     try:
-        supabase.auth.sign_out()
-    except Exception:
-        pass  # Treat as a success regardless
+        supabase_admin.auth.admin.sign_out(user.id)
+    except Exception as exc:
+        logger.warning(f"[auth] logout revocation failed for {user.id}: {exc}")
     return {"message": "Logged out successfully."}
 
 
@@ -534,7 +717,7 @@ async def google_login(payload: GoogleLoginRequest):
     - Enable the Google provider in your Supabase Auth dashboard.
     - Add your `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in Supabase.
     """
-    allowed_roles = {"customer", "vendor"}
+    allowed_roles = {"customer", "vendor", "logist"}
     if payload.role not in allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

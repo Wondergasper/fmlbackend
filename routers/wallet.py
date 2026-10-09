@@ -289,6 +289,17 @@ async def paystack_webhook(request: Request):
             "description": "Wallet top-up via Paystack webhook",
         }).execute()
 
+        # Send wallet topup email notification
+        try:
+            cust_res = supabase_admin.table("profiles").select("email, full_name").eq("id", user_id).execute()
+            if cust_res.data:
+                cust_email = cust_res.data[0].get("email")
+                cust_name = cust_res.data[0].get("full_name", "Customer")
+                if cust_email:
+                    send_wallet_topup_receipt.delay(cust_email, cust_name, amount_kobo, new_balance, reference)
+        except Exception as exc:
+            logger.warning(f"[wallet] Webhook top-up receipt email failed: {exc}")
+
     return {"received": True}
 
 

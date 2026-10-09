@@ -100,7 +100,7 @@ async def update_my_vendor_profile(
     if not update_data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided to update.")
 
-    res = supabase.table("profiles").update(update_data).eq("id", user.id).execute()
+    res = supabase_admin.table("profiles").update(update_data).eq("id", user.id).execute()
     return {"message": "Vendor profile updated successfully.", "data": res.data[0] if res.data else None}
 
 

@@ -38,6 +38,13 @@ from typing import Optional
 from celery_app import celery_app
 from config import settings
 
+# Populate os.environ from .env so the os.getenv(...) calls below pick up our
+# config. pydantic-settings loads .env into the `settings` object but does NOT
+# export it to the process environment, so without this every email fell back
+# to the unverified default sender and silently failed.
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

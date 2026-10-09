@@ -31,8 +31,10 @@ def register_user(email: str, password: str, full_name: str, role: str = "custom
 
     if role == "vendor":
         from database import supabase_admin
+        from config import settings
         supabase_admin.table("profiles").update({"status": "Pending Approval"}).eq("id", user_id).execute()
-        send_admin_new_vendor.delay(email, full_name)
+        admin_email = getattr(settings, "admin_email", "admin@farm-connect.ng")
+        send_admin_new_vendor.delay(admin_email, full_name, email, user_id)
 
     if role == "customer":
         send_welcome_customer.delay(email, full_name)
