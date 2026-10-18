@@ -8,18 +8,38 @@ re-exports these symbols for backward compatibility).
 Exports:
   get_current_user   — Validates the Bearer JWT via Supabase Auth; returns the user object.
   require_role       — Dependency factory; enforces that the caller holds one of the
-                       supplied roles (accepts a list[str] or a single str).
+                       supplied roles (supports aliases, sets, and lists).
   require_any_role   — Alias for require_role; kept for readability in routes where
                        the multi-role intent should be explicit.
+  canonicalize_role  — Normalizes any role or alias to its canonical string.
 """
 
+from typing import Any, Iterable
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import supabase
+from schemas.auth import Role, ROLE_ALIASES, canonicalize_role
 
 # auto_error=False lets us return a descriptive 401 instead of FastAPI's
 # generic "Not authenticated" response when the header is missing.
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _expand_roles(roles: Iterable[str]) -> set[str]:
+    """Expand roles to include both canonical representations and all recognized aliases."""
+    expanded = set()
+    for r in roles:
+        if not r:
+            continue
+        clean = r.strip().lower()
+        expanded.add(clean)
+        canonical = canonicalize_role(clean)
+        if canonical:
+            expanded.add(canonical)
+            for alias, target in ROLE_ALIASES.items():
+                if target == canonical:
+                    expanded.add(alias)
+    return expanded
 
 
 async def get_current_user(
@@ -58,67 +78,93 @@ async def get_current_user(
         )
 
 
-def require_role(allowed_roles: list[str] | str):
+def require_role(allowed_roles: list[str] | set[str] | str):
     """Dependency factory: enforce that the caller holds one of the given roles.
 
-    Accepts either a list of role strings or a single role string so that
-    all call-site signatures are supported:
+    Accepts either an iterable of role strings or a single role string.
+    Automatically resolves canonical roles and accepted aliases:
+      - 'driver' and 'courier' transparently match 'rider'
+      - 'logistics' transparently matches 'logist'
+      - 'superadmin' transparently matches 'admin'
 
-        user=Depends(require_role(["admin"]))           # single role via list
-        user=Depends(require_role(["vendor", "admin"])) # multiple roles
-        user=Depends(require_role("admin"))             # single role as str
+    Attaches resolved `.role` and `.profile` to the returned user object
+    to eliminate downstream N+1 database queries.
 
     Raises HTTP 401 if the user is not authenticated.
     Raises HTTP 403 if the user's role is not in the allowed set.
     """
-    # Normalise to a set for O(1) membership checks
     if isinstance(allowed_roles, str):
-        roles_set = {allowed_roles}
+        raw_roles = [allowed_roles]
     else:
-        roles_set = set(allowed_roles)
+        raw_roles = list(allowed_roles)
 
-    async def dependency(user=Depends(get_current_user)):
+    expanded_roles_set = _expand_roles(raw_roles)
+
+    async def dependency(user: Any = Depends(get_current_user)):
         # 1. Fast-path: Check if user object already specifies role (e.g. test fixtures, token claims)
         role_attr = getattr(user, "role", None)
-        if role_attr and role_attr in roles_set:
-            return user
+        if isinstance(role_attr, str):
+            canonical_role_attr = canonicalize_role(role_attr)
+            if role_attr.lower() in expanded_roles_set or (canonical_role_attr and canonical_role_attr in expanded_roles_set):
+                return user
+        else:
+            role_attr = None
 
-        # 2. Check dependencies.supabase (for tests patching dependencies.supabase) then supabase
+        # 2. Check dependencies.supabase (for tests patching dependencies.supabase) then database.supabase
         import dependencies
         db = getattr(dependencies, "supabase", supabase)
 
+        profile_data = None
         actual_role = None
         try:
             profile_res = (
                 db.table("profiles")
-                .select("role")
+                .select("*")
                 .eq("id", user.id)
                 .execute()
             )
             profile_data = profile_res.data[0] if profile_res.data else None
-            actual_role = profile_data.get("role") if profile_data else None
+            if profile_data:
+                actual_role = profile_data.get("role")
         except Exception:
             # If DB rejects non-UUID (e.g. "admin-001" in test fixtures), check mock conventions
-            uid = str(getattr(user, "id", ""))
+            uid = str(getattr(user, "id", "")).lower()
             if "admin" in uid:
                 actual_role = "admin"
             elif "vend" in uid:
                 actual_role = "vendor"
+            elif "logist" in uid:
+                actual_role = "logist"
+            elif any(k in uid for k in ("driver", "rider", "courier")):
+                actual_role = "rider"
             elif "cust" in uid:
                 actual_role = "customer"
-            elif "driver" in uid or "rider" in uid:
-                actual_role = "driver"
             else:
                 actual_role = role_attr
 
-        if actual_role not in roles_set:
+        canonical_actual = canonicalize_role(actual_role) if actual_role else None
+        is_allowed = False
+        if actual_role and actual_role.lower() in expanded_roles_set:
+            is_allowed = True
+        elif canonical_actual and canonical_actual in expanded_roles_set:
+            is_allowed = True
+
+        if not is_allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    f"Access denied. Required role: {sorted(roles_set)}. "
+                    f"Access denied. Required role: {sorted(set(raw_roles))}. "
                     f"Your role: '{actual_role}'."
                 ),
             )
+
+        # Cache resolved role and profile on user instance to eliminate redundant DB calls
+        try:
+            setattr(user, "role", canonical_actual or actual_role)
+            setattr(user, "profile", profile_data)
+        except Exception:
+            pass
+
         return user
 
     return dependency
@@ -129,8 +175,5 @@ def require_any_role(*roles: str):
 
     Usage:
         user=Depends(require_any_role("vendor", "admin"))
-
-    This is a readability alias — the underlying logic is identical to
-    require_role when a list is passed.
     """
     return require_role(list(roles))

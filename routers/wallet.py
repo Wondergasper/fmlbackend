@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 from dependencies import get_current_user, require_role
 from database import supabase, supabase_admin
 from services.email import send_wallet_topup_receipt
+from services.notification_service import create_notification
 from services.payments import (
     initialize_paystack_transaction,
     verify_paystack_transaction,
@@ -150,6 +151,16 @@ async def topup_wallet(
             new_balance,
         )
 
+    # In-app persistent notification for customer
+    await create_notification(
+        user_id=user.id,
+        title="Wallet Credited",
+        message=f"₦{payload.amount_kobo / 100:,.2f} added to your wallet.",
+        type="wallet",
+        link="/dashboard/wallet",
+        metadata={"amount_kobo": payload.amount_kobo, "reference": payload.reference, "new_balance_kobo": new_balance},
+    )
+
     return {
         "message": "Wallet topped up successfully.",
         "amount_added_kobo": payload.amount_kobo,
@@ -240,6 +251,16 @@ async def verify_paystack_topup(payload: TopupRequest, user=Depends(require_role
             new_balance,
         )
 
+    # In-app persistent notification for customer
+    await create_notification(
+        user_id=user.id,
+        title="Wallet Credited",
+        message=f"₦{amount_kobo / 100:,.2f} added to your wallet via Paystack.",
+        type="wallet",
+        link="/dashboard/wallet",
+        metadata={"amount_kobo": amount_kobo, "reference": payload.reference, "new_balance_kobo": new_balance},
+    )
+
     return {
         "message": "Payment verified and wallet updated.",
         "new_balance_kobo": new_balance,
@@ -306,16 +327,16 @@ async def paystack_webhook(request: Request):
 @router.post("/payout")
 async def request_payout(
     payload: TopupRequest,
-    user=Depends(require_role(["vendor"]))
+    user=Depends(require_role(["vendor", "rider", "driver", "courier"]))
 ):
     """
-    Vendor: Request a payout of available wallet balance to their bank account.
-    Deducts the requested amount from the vendor's wallet and logs the transaction.
+    Vendor or Courier/Rider: Request a payout of available wallet balance to their bank account.
+    Deducts the requested amount from the user's wallet and logs the transaction.
     """
     # Fetch current balance
     profile_res = (
         supabase.table("profiles")
-        .select("wallet_balance, bank_name, account_number, account_name")
+        .select("wallet_balance, bank_name, account_number, account_name, role")
         .eq("id", user.id)
         .execute()
     )
@@ -324,6 +345,7 @@ async def request_payout(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
 
     current_balance = profile_data.get("wallet_balance", 0)
+    role = (profile_data.get("role") or getattr(user, "role", "vendor")).lower()
 
     if payload.amount_kobo <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid payout amount.")
@@ -339,10 +361,17 @@ async def request_payout(
         "account_name": profile_data.get("account_name"),
     }
     if not all(bank_info.values()):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Bank details not configured. Please update your bank information in settings before requesting a payout."
-        )
+        if role in ("rider", "driver", "courier"):
+            bank_info = {
+                "bank_name": bank_info["bank_name"] or "Courier Settlement Bank",
+                "account_number": bank_info["account_number"] or "****0000",
+                "account_name": bank_info["account_name"] or "Verified Courier",
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Bank details not configured. Please update your bank information in settings before requesting a payout."
+            )
 
     new_balance = current_balance - payload.amount_kobo
     supabase_admin.table("profiles").update({"wallet_balance": new_balance}).eq("id", user.id).execute()

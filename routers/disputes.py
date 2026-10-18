@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from dependencies import get_current_user, require_role
 from database import supabase, supabase_admin
+from services.notification_service import create_notification
 from routers.uploads import _validate_image_bytes, _MAGIC, ensure_storage_bucket
 
 # Extend allowed types for dispute evidence to include PDF
@@ -219,6 +220,30 @@ async def open_dispute(
         "note": f"Dispute opened: {payload.reason}"
     }
     supabase_admin.table("dispute_notes").insert(note_data).execute()
+
+    # In-app persistent notification for customer
+    customer_id = order_data.get("customer_id")
+    if customer_id:
+        await create_notification(
+            user_id=customer_id,
+            title="Dispute Opened",
+            message=f"Dispute opened for order #{payload.order_id[:8]}: {payload.reason}",
+            type="dispute",
+            link=f"/dashboard/disputes/{dispute['id']}",
+            metadata={"dispute_id": dispute["id"], "order_id": payload.order_id},
+        )
+
+    # In-app persistent notification for vendors involved
+    for vid in vendor_ids:
+        if vid != user.id:
+            await create_notification(
+                user_id=vid,
+                title="Dispute Filed on Order",
+                message=f"A dispute has been opened for order #{payload.order_id[:8]}.",
+                type="dispute",
+                link=f"/dashboard/disputes/{dispute['id']}",
+                metadata={"dispute_id": dispute["id"], "order_id": payload.order_id},
+            )
 
     return {"message": "Dispute opened successfully.", "dispute": dispute}
 
@@ -591,5 +616,34 @@ async def resolve_dispute(
         "note": f"[RESOLVED - Outcome: {payload.resolution_outcome}] {notes_clean}"
     }
     supabase_admin.table("dispute_notes").insert(note_data).execute()
+
+    # In-app persistent notifications for customer and vendors
+    order_id = dispute_rec.get("order_id")
+    if order_id:
+        try:
+            ord_res = supabase.table("orders").select("customer_id, order_items(*, products(vendor_id))").eq("id", order_id).execute()
+            if ord_res.data:
+                o_data = ord_res.data[0]
+                c_id = o_data.get("customer_id")
+                if c_id:
+                    await create_notification(
+                        user_id=c_id,
+                        title="Dispute Resolved",
+                        message=f"Dispute for order #{order_id[:8]} was resolved: '{payload.resolution_outcome}'.",
+                        type="dispute",
+                        link=f"/dashboard/disputes/{dispute_id}",
+                        metadata={"dispute_id": dispute_id, "order_id": order_id, "outcome": payload.resolution_outcome},
+                    )
+                for v_id in get_order_associated_vendor_ids(o_data):
+                    await create_notification(
+                        user_id=v_id,
+                        title="Dispute Resolved",
+                        message=f"Dispute for order #{order_id[:8]} was resolved: '{payload.resolution_outcome}'.",
+                        type="dispute",
+                        link=f"/dashboard/disputes/{dispute_id}",
+                        metadata={"dispute_id": dispute_id, "order_id": order_id, "outcome": payload.resolution_outcome},
+                    )
+        except Exception:
+            pass
 
     return {"message": f"Dispute resolved with outcome '{payload.resolution_outcome}'.", "dispute": dispute_rec}

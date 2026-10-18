@@ -266,8 +266,8 @@ async def get_delivery_pool(
     try:
         res = (
             supabase_admin.table("orders")
-            .select("*, customer:profiles!customer_id(full_name, phone, delivery_address), order_items(*, products(*))")
-            .in_("status", ["Processing", "Ready for Pickup", "In Transit"])
+            .select("*, customer:profiles!customer_id(full_name, phone, delivery_address), order_items(*, products(*, vendor:profiles!vendor_id(full_name, farm_name, location, phone)))")
+            .in_("status", ["Pending", "Processing", "Ready for Pickup", "In Transit"])
             .is_("driver_id", "null")
             .order("created_at", desc=True)
             .execute()
@@ -277,7 +277,7 @@ async def get_delivery_pool(
         res = (
             supabase_admin.table("orders")
             .select("*, customer:profiles!customer_id(full_name, phone, delivery_address), order_items(*, products(*))")
-            .in_("status", ["Processing", "Ready for Pickup"])
+            .in_("status", ["Pending", "Processing", "Ready for Pickup"])
             .order("created_at", desc=True)
             .execute()
         )
@@ -285,6 +285,8 @@ async def get_delivery_pool(
 
     offers = []
     for o in orders:
+        if o.get("driver_id"):
+            continue
         o_lat = o.get("latitude") or 6.5244
         o_lng = o.get("longitude") or 3.3792
         dist = 0.0
@@ -295,28 +297,78 @@ async def get_delivery_pool(
 
         cust = o.get("customer") or {}
         items = o.get("order_items") or []
-        items_count = sum(i.get("quantity", 1) for i in items)
+        items_count = sum(i.get("quantity", 1) for i in items if isinstance(i, dict))
+
+        farm_name = "Farm Depot"
+        farm_address = "Lagos Agro Distribution Hub"
+        farm_phone = "+2348003276435"
+        formatted_items = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            prod = it.get("products") or {}
+            if isinstance(prod, dict):
+                vendor = prod.get("vendor") or {}
+                if isinstance(vendor, dict):
+                    if vendor.get("farm_name") or vendor.get("full_name"):
+                        farm_name = vendor.get("farm_name") or vendor.get("full_name")
+                    if vendor.get("location"):
+                        farm_address = vendor.get("location")
+                    if vendor.get("phone"):
+                        farm_phone = vendor.get("phone")
+                elif prod.get("origin") and farm_address == "Lagos Agro Distribution Hub":
+                    farm_address = prod.get("origin")
+                formatted_items.append({
+                    "name": prod.get("name") or "Produce Item",
+                    "quantity": it.get("quantity", 1),
+                    "unit": prod.get("unit") or "unit",
+                })
+
+        customer_name = cust.get("full_name") or o.get("customer_name") or "Customer"
+        customer_address = o.get("delivery_address") or cust.get("delivery_address") or "Lagos"
+        customer_phone = cust.get("phone") or o.get("customer_phone") or "+2348000000000"
+        delivery_type = (o.get("delivery_type") or "standard").lower()
+        payout_kobo = 150000 if delivery_type == "express" else 125000
 
         offers.append({
             "id": f"task-{o['id'][:8]}",
             "orderId": o["id"],
             "order_id": o["id"],
-            "farmName": "Farm Depot",
-            "farmAddress": "Lagos Agro Distribution Hub",
-            "farmPhone": "+2348003276435",
+            "farmName": farm_name,
+            "vendor_name": farm_name,
+            "farm_name": farm_name,
+            "farmAddress": farm_address,
+            "vendor_address": farm_address,
+            "farm_address": farm_address,
+            "farmPhone": farm_phone,
+            "vendor_phone": farm_phone,
+            "farm_phone": farm_phone,
             "farmLat": 6.5244,
+            "vendor_lat": 6.5244,
+            "farm_lat": 6.5244,
             "farmLng": 3.3792,
-            "customerName": cust.get("full_name") or "Customer",
-            "customerAddress": o.get("delivery_address") or cust.get("delivery_address") or "Lagos",
-            "customerPhone": cust.get("phone") or "+2348000000000",
+            "vendor_lng": 3.3792,
+            "farm_lng": 3.3792,
+            "customerName": customer_name,
+            "customer_name": customer_name,
+            "customerAddress": customer_address,
+            "delivery_address": customer_address,
+            "customerPhone": customer_phone,
+            "customer_phone": customer_phone,
             "customerLat": float(o_lat),
+            "destination_lat": float(o_lat),
             "customerLng": float(o_lng),
+            "destination_lng": float(o_lng),
             "itemsCount": items_count,
-            "payoutKobo": 125000,
+            "items": formatted_items,
+            "payoutKobo": payout_kobo,
+            "delivery_fee_kobo": payout_kobo,
             "distanceKm": dist,
             "status": "available",
-            "deliveryType": o.get("delivery_type", "standard"),
-            "createdAt": o.get("created_at")
+            "deliveryType": delivery_type,
+            "delivery_type": delivery_type,
+            "createdAt": o.get("created_at"),
+            "created_at": o.get("created_at"),
         })
 
     return offers
@@ -330,9 +382,22 @@ async def accept_delivery_offer(
     """
     Courier claims an available delivery order from the pool.
     """
-    order_res = supabase_admin.table("orders").select("id, status").eq("id", order_id).execute()
+    order_res = supabase_admin.table("orders").select("id, status, driver_id").eq("id", order_id).execute()
     if not order_res.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found.")
+
+    order_row = order_res.data[0]
+    if order_row.get("status") in ("Cancelled", "Delivered"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Order cannot be accepted because its status is {order_row.get('status')}."
+        )
+    existing_driver = order_row.get("driver_id")
+    if existing_driver and existing_driver != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Order has already been claimed by another courier."
+        )
 
     rider_id = user.id
     supabase_admin.table("orders").update({
@@ -361,14 +426,29 @@ async def submit_proof_of_delivery(
 ):
     """
     Submit Proof of Delivery (POD) photo, recipient name, and notes, marking the order Delivered.
+    Credits the courier's wallet with the delivery payout.
     """
     if not payload.image_url.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Proof of delivery photo is required.")
     if not payload.recipient_name.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recipient signature name is required.")
 
+    order_check = supabase_admin.table("orders").select("id, status, driver_id").eq("id", order_id).execute()
+    if not order_check.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found.")
+
+    order_row = order_check.data[0]
+    if order_row.get("status") == "Delivered":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Proof of delivery already submitted for this order.")
+
+    caller_role = getattr(user, "role", "rider")
+    assigned_driver = order_row.get("driver_id")
+    if assigned_driver and assigned_driver != user.id and caller_role not in ("admin", "logist"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not the assigned courier for this order.")
+
     now_iso = datetime.now(timezone.utc).isoformat()
     receipt_id = f"POD-REC-{order_id[:6].upper()}"
+    payout_kobo = 125000
 
     update_fields = {
         "status": "Delivered",
@@ -379,6 +459,23 @@ async def submit_proof_of_delivery(
 
     supabase_admin.table("orders").update(update_fields).eq("id", order_id).execute()
 
+    # Credit courier wallet balance and record ledger transaction (best-effort)
+    try:
+        prof_res = supabase_admin.table("profiles").select("wallet_balance").eq("id", user.id).execute()
+        if prof_res.data and isinstance(prof_res.data[0], dict):
+            cur_bal = prof_res.data[0].get("wallet_balance") or 0
+            supabase_admin.table("profiles").update({"wallet_balance": cur_bal + payout_kobo}).eq("id", user.id).execute()
+            supabase_admin.table("wallet_transactions").insert({
+                "user_id": user.id,
+                "type": "Credit",
+                "amount_kobo": payout_kobo,
+                "reference": f"pod_earning_{order_id}",
+                "status": "Success",
+                "description": f"Courier delivery payout for order #{order_id[:8]}",
+            }).execute()
+    except Exception:
+        pass
+
     await connection_manager.broadcast_order_updated(order_id, "Delivered", {
         "proofOfDeliveryUrl": payload.image_url,
         "recipientName": payload.recipient_name,
@@ -388,7 +485,8 @@ async def submit_proof_of_delivery(
 
     return {
         "success": True,
-        "payoutKobo": 125000,
+        "payoutKobo": payout_kobo,
+        "payout_unlocked_kobo": payout_kobo,
         "receiptId": receipt_id,
         "completedAt": now_iso
     }

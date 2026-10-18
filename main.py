@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import products, auth, orders, vendors, wallet, analytics, uploads, websockets, disputes, admin, logistics
+from routers import products, auth, orders, vendors, wallet, analytics, uploads, websockets, disputes, admin, logistics, notifications
 from config import settings
 from services.email import send_weekly_vendor_digest
 from services.rate_limiter import RateLimitMiddleware, init_redis, close_redis
@@ -154,6 +154,7 @@ app.include_router(websockets.router) # /ws/orders/{order_id} (real-time order t
 app.include_router(disputes.router)   # /disputes/ (structured dispute audit trail & resolution)
 app.include_router(admin.router)      # /admin/config (platform config persistence) & /admin/categories (CRUD)
 app.include_router(logistics.router)  # /logistics/hubs, /logistics/riders (logistics portal)
+app.include_router(notifications.router) # /notifications/ (in-app persistent alerts & badges)
 
 # ---------------------------------------------------------------------------
 # Health check

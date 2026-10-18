@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     google_maps_api_key: str = ""
     google_client_id: str = ""
 
+    # Geolocation & Open-Source Routing
+    osrm_url: str = "https://router.project-osrm.org"
+    nominatim_url: str = "https://nominatim.openstreetmap.org"
+    geo_provider: str = "osrm"  # "osrm" | "google" | "haversine"
+    geo_min_distance_update_meters: float = 100.0
+    geo_min_time_update_seconds: int = 30
+
     # App
     environment: str = "development"
     app_name: str = "Farmers Market API"

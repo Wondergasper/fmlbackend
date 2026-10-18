@@ -12,7 +12,8 @@ import math
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from database import supabase, supabase_admin
 from services.websocket_manager import connection_manager
-from services.google_maps import get_distance_and_eta
+from services.routing import get_distance_and_eta, calculate_haversine_distance_km
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ async def authorize_websocket_order(user_id: str, order_id: str) -> bool:
         )
         role = profile_res.data.get("role", "customer") if profile_res.data else "customer"
 
-        if role in ["admin", "driver", "courier"]:
+        if role in ["admin", "driver", "courier", "rider", "logist"]:
             return True
 
         order_res = await asyncio.to_thread(
@@ -248,6 +249,32 @@ async def websocket_order_tracking(
                     "message": "Administrative events cannot be sent via client WebSocket."
                 })
             elif event_type in ["delivery_location_ping", "location_ping"]:
+                # Verify sender is the assigned courier or a privileged logistics/admin user
+                is_authorized_sender = False
+                try:
+                    ord_chk = supabase_admin.table("orders").select("driver_id").eq("id", order_id).execute()
+                    assigned_driver_id = ord_chk.data[0].get("driver_id") if ord_chk.data else None
+                    if assigned_driver_id and assigned_driver_id == user_id:
+                        is_authorized_sender = True
+                    else:
+                        prof_chk = supabase.table("profiles").select("role").eq("id", user_id).execute()
+                        p_data = prof_chk.data[0] if isinstance(prof_chk.data, list) and prof_chk.data else (prof_chk.data if isinstance(prof_chk.data, dict) else {})
+                        s_role = (p_data.get("role") or "").lower()
+                        if s_role in ("driver", "courier", "rider", "admin", "logist") and (not assigned_driver_id or s_role in ("admin", "logist")):
+                            is_authorized_sender = True
+                        elif not assigned_driver_id and not s_role:
+                            is_authorized_sender = True
+                except Exception:
+                    is_authorized_sender = True
+
+                if not is_authorized_sender:
+                    await websocket.send_json({
+                        "error": "Forbidden",
+                        "type": "error",
+                        "message": "Only the assigned courier can broadcast GPS location pings."
+                    })
+                    continue
+
                 raw_lat = data.get("latitude")
                 raw_lng = data.get("longitude")
                 try:
@@ -278,13 +305,13 @@ async def websocket_order_tracking(
                     "sender_id": user_id
                 }
 
-                # Persist driver location to DB and calculate ETA (best-effort)
+                # Persist driver location to DB and calculate ETA (smart throttling & best-effort)
                 distance_text = None
                 eta_minutes = None
                 try:
                     order_res = (
                         supabase_admin.table("orders")
-                        .select("latitude, longitude")
+                        .select("latitude, longitude, driver_latitude, driver_longitude, distance_text, eta_minutes")
                         .eq("id", order_id)
                         .execute()
                     )
@@ -292,23 +319,63 @@ async def websocket_order_tracking(
                         order_row = order_res.data[0]
                         dest_lat = order_row.get("latitude")
                         dest_lng = order_row.get("longitude")
+                        prev_lat = order_row.get("driver_latitude")
+                        prev_lng = order_row.get("driver_longitude")
+                        cached_distance = order_row.get("distance_text")
+                        cached_eta = order_row.get("eta_minutes")
 
-                        update_fields = {"driver_latitude": lat, "driver_longitude": lng}
+                        should_recalc = True
+                        if prev_lat is not None and prev_lng is not None and cached_distance and cached_eta:
+                            try:
+                                moved_m = calculate_haversine_distance_km(
+                                    float(prev_lat), float(prev_lng), lat, lng
+                                ) * 1000.0
+                                min_move_m = getattr(settings, "geo_min_distance_update_meters", 100.0)
+                                if moved_m < min_move_m:
+                                    should_recalc = False
+                                    distance_text = cached_distance
+                                    eta_minutes = cached_eta
+                            except Exception:
+                                should_recalc = True
 
-                        if dest_lat is not None and dest_lng is not None:
+                        if should_recalc and dest_lat is not None and dest_lng is not None:
                             distance_text, eta_minutes = await get_distance_and_eta(
                                 lat, lng, float(dest_lat), float(dest_lng)
                             )
-                            if distance_text:
-                                update_fields["distance_text"] = distance_text
-                            if eta_minutes:
-                                update_fields["eta_minutes"] = eta_minutes
+
+                        if distance_text is None:
+                            distance_text = cached_distance
+                        if eta_minutes is None:
+                            eta_minutes = cached_eta
+
+                        update_fields = {"driver_latitude": lat, "driver_longitude": lng}
+                        if distance_text:
+                            update_fields["distance_text"] = distance_text
+                        if eta_minutes:
+                            update_fields["eta_minutes"] = eta_minutes
 
                         supabase_admin.table("orders").update(update_fields).eq("id", order_id).execute()
+
+                    # Save telemetry breadcrumb
+                    breadcrumb_data = {
+                        "order_id": order_id,
+                        "driver_id": user_id,
+                        "latitude": lat,
+                        "longitude": lng,
+                        "heading": data.get("heading"),
+                        "speed": data.get("speed"),
+                        "accuracy": data.get("accuracy"),
+                        "provider": data.get("provider") or "gps",
+                    }
+                    supabase_admin.table("order_tracking_breadcrumbs").insert(breadcrumb_data).execute()
                 except Exception as db_exc:
                     logger.warning(f"[ws] DB location persist error for order {order_id}: {db_exc}")
 
-                # Enrich broadcast payload with ETA if available
+                # Enrich broadcast payload with heading, accuracy, and ETA if available
+                if "heading" in data:
+                    payload["heading"] = data["heading"]
+                if "accuracy" in data:
+                    payload["accuracy"] = data["accuracy"]
                 payload["distance_text"] = distance_text
                 payload["eta_minutes"]   = eta_minutes
 
@@ -358,16 +425,17 @@ async def websocket_rider_dispatch(
     # Check rider / driver / courier role
     try:
         profile_res = await asyncio.to_thread(
-            lambda: supabase.table("profiles").select("role").eq("id", user_id).single().execute()
+            lambda: supabase.table("profiles").select("role").eq("id", user_id).execute()
         )
-        role = profile_res.data.get("role", "") if profile_res.data else ""
-        if role not in ["driver", "courier", "rider", "admin", "logist"]:
-            # Check mock or rider table if in development
+        p_row = profile_res.data[0] if isinstance(profile_res.data, list) and profile_res.data else (profile_res.data if isinstance(profile_res.data, dict) else {})
+        role = (p_row.get("role") or "").lower()
+        if role and role not in ["driver", "courier", "rider", "admin", "logist"]:
             rider_check = await asyncio.to_thread(
                 lambda: supabase_admin.table("riders").select("id").eq("id", user_id).execute()
             )
-            if not rider_check.data and role != "customer":
-                pass  # allow connection for testing/demo flexibility
+            if not rider_check.data:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Courier role required.")
+                return
     except Exception as exc:
         logger.warning(f"[ws] Rider role check warning for {user_id}: {exc}")
 
@@ -483,3 +551,59 @@ async def websocket_rider_dispatch(
         logger.error(f"[ws] Unexpected rider websocket error for {user_id}: {exc}")
     finally:
         connection_manager.disconnect_rider(user_id, websocket)
+
+
+@router.websocket("/notifications")
+async def websocket_user_notifications(
+    websocket: WebSocket,
+    token: str = Query(None, description="Supabase access token for authentication")
+):
+    """
+    WebSocket endpoint for real-time in-app notifications (alerts, badges, status updates).
+    """
+    extracted_token = await extract_token_from_websocket(websocket, token)
+
+    try:
+        user_id = await authenticate_websocket(extracted_token)
+    except ValueError as err:
+        logger.warning(f"[ws] Auth failed for notifications stream: {err}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=str(err))
+        return
+
+    await connection_manager.connect_user(user_id, websocket)
+
+    try:
+        await websocket.send_json({
+            "event": "connected",
+            "type": "connected",
+            "user_id": user_id,
+            "message": "Connected to notifications stream."
+        })
+
+        while True:
+            data_text = await websocket.receive_text()
+            try:
+                data = json.loads(data_text)
+            except json.JSONDecodeError:
+                await websocket.send_json({
+                    "error": "Invalid JSON format",
+                    "type": "error"
+                })
+                continue
+
+            event_type = data.get("event") or data.get("type")
+            if event_type in ["ping", "ping_pong"]:
+                await websocket.send_json({"event": "pong", "type": "pong"})
+            else:
+                await websocket.send_json({"status": "received"})
+
+    except WebSocketDisconnect:
+        logger.info(f"[ws] User notifications socket disconnected cleanly for {user_id}")
+    except asyncio.CancelledError:
+        logger.info(f"[ws] User notifications connection cancelled for {user_id}")
+        raise
+    except Exception as exc:
+        logger.error(f"[ws] Unexpected error for user notifications {user_id}: {exc}")
+    finally:
+        connection_manager.disconnect_user(user_id, websocket)
+

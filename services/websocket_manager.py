@@ -151,6 +151,42 @@ class OrderConnectionManager:
                 if not self.active_connections["riders_pool"]:
                     del self.active_connections["riders_pool"]
 
+    async def connect_user(self, user_id: str, websocket: WebSocket):
+        await websocket.accept()
+        async with self.lock:
+            key = f"user:{user_id}"
+            if key not in self.active_connections:
+                self.active_connections[key] = set()
+            self.active_connections[key].add(websocket)
+
+    def disconnect_user(self, user_id: str, websocket: WebSocket):
+        with self._thread_lock:
+            key = f"user:{user_id}"
+            if key in self.active_connections:
+                self.active_connections[key].discard(websocket)
+                if not self.active_connections[key]:
+                    del self.active_connections[key]
+
+    async def broadcast_user_notification(self, user_id: str, notification: dict):
+        """Broadcast in-app notification to all active sockets of a specific user."""
+        payload = {
+            "event": "in_app_notification",
+            "type": "in_app_notification",
+            "notification": notification
+        }
+        key = f"user:{user_id}"
+        async with self.lock:
+            active = list(self.active_connections.get(key, []))
+
+        if active:
+            results = await asyncio.gather(
+                *[connection.send_json(payload) for connection in active],
+                return_exceptions=True
+            )
+            for connection, result in zip(active, results):
+                if isinstance(result, Exception):
+                    self.disconnect_user(user_id, connection)
+
     async def broadcast_to_riders(self, message: dict):
         """Broadcast message to all connected delivery riders."""
         async with self.lock:

@@ -21,6 +21,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 # Fix #1 — single source of truth: all routes use middleware.auth
 from middleware.auth import get_current_user
+from schemas.auth import Role, ALL_PLATFORM_ROLES, canonicalize_role
 from database import supabase, supabase_admin
 from config import settings
 from services import rate_limiter as _rate_limiter
@@ -42,13 +43,22 @@ def _otp_attempt_key(email: str, purpose: str) -> str:
     return f"otp_attempts:{purpose}:{email}"
 
 
-def _check_otp_attempts(email: str, purpose: str) -> None:
+import inspect
+
+
+async def _maybe_await(val):
+    if inspect.isawaitable(val):
+        return await val
+    return val
+
+
+async def _check_otp_attempts(email: str, purpose: str) -> None:
     """Raise 429 if this email has exceeded the OTP attempt limit."""
     client = _otp_redis_client()
     if client is None:
         return
     try:
-        val = client.get(_otp_attempt_key(email, purpose))
+        val = await _maybe_await(client.get(_otp_attempt_key(email, purpose)))
         if val and int(val) >= OTP_MAX_ATTEMPTS:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -60,24 +70,24 @@ def _check_otp_attempts(email: str, purpose: str) -> None:
         pass
 
 
-def _register_otp_failure(email: str, purpose: str) -> None:
+async def _register_otp_failure(email: str, purpose: str) -> None:
     client = _otp_redis_client()
     if client is None:
         return
     try:
         key = _otp_attempt_key(email, purpose)
-        client.incr(key)
-        client.expire(key, OTP_ATTEMPT_WINDOW_SECONDS)
+        await _maybe_await(client.incr(key))
+        await _maybe_await(client.expire(key, OTP_ATTEMPT_WINDOW_SECONDS))
     except Exception:
         pass
 
 
-def _clear_otp_attempts(email: str, purpose: str) -> None:
+async def _clear_otp_attempts(email: str, purpose: str) -> None:
     client = _otp_redis_client()
     if client is None:
         return
     try:
-        client.delete(_otp_attempt_key(email, purpose))
+        await _maybe_await(client.delete(_otp_attempt_key(email, purpose)))
     except Exception:
         pass
 from services.email import (
@@ -177,8 +187,13 @@ async def register(payload: RegisterRequest):
         logger.warning(f"[auth] Could not auto-confirm email for {user_id}: {e}")
 
     # 2. Insert a profile row via the admin client (bypasses RLS)
-    # Database check constraint allows: 'customer', 'vendor', 'admin', 'driver', 'courier'
-    db_role = "courier" if payload.role in ("rider", "courier", "driver", "logist") else payload.role
+    if payload.role in ("rider", "courier", "driver"):
+        db_role = "rider"
+    elif payload.role in ("logist", "logistics"):
+        db_role = "logist"
+    else:
+        db_role = payload.role
+
     profile_data = {
         "id": user_id,
         "email": payload.email,
@@ -294,9 +309,9 @@ async def login(payload: LoginRequest):
 
     # Fix #2 — enforce role match when the caller specifies an expected role
     if payload.expected_role:
-        expected = payload.expected_role
-        courier_roles = {"rider", "courier", "driver", "logist"}
-        roles_match = (actual_role == expected) or (expected in courier_roles and actual_role in courier_roles)
+        expected_canonical = canonicalize_role(payload.expected_role) or payload.expected_role.lower()
+        actual_canonical = canonicalize_role(actual_role) or (actual_role.lower() if actual_role else "")
+        roles_match = (actual_role == payload.expected_role) or (expected_canonical == actual_canonical)
         if not roles_match:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -466,7 +481,7 @@ async def verify_otp(payload: VerifyOtpRequest):
             detail="No account found with this email."
         )
 
-    _check_otp_attempts(payload.email, "email_verification")
+    await _check_otp_attempts(payload.email, "email_verification")
 
     if profile.get("email_verified"):
         return {"message": "Email already verified.", "email": payload.email, "verified": True}
@@ -487,7 +502,7 @@ async def verify_otp(payload: VerifyOtpRequest):
         )
 
     if stored_code != payload.otp_code:
-        _register_otp_failure(payload.email, "email_verification")
+        await _register_otp_failure(payload.email, "email_verification")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Incorrect verification code."
@@ -497,7 +512,7 @@ async def verify_otp(payload: VerifyOtpRequest):
     if expires_at:
         expires_dt = datetime.fromisoformat(expires_at)
         if expires_dt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-            _register_otp_failure(payload.email, "email_verification")
+            await _register_otp_failure(payload.email, "email_verification")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="OTP has expired. Please request a new code."
@@ -510,7 +525,7 @@ async def verify_otp(payload: VerifyOtpRequest):
         "otp_purpose": None,
     }).eq("id", profile["id"]).execute()
 
-    _clear_otp_attempts(payload.email, "email_verification")
+    await _clear_otp_attempts(payload.email, "email_verification")
 
     # Align Supabase Auth's email confirmation with our app flag so that login
     # (which gates on Supabase email_confirmed_at) works in production too.
@@ -591,7 +606,7 @@ async def reset_password(payload: ResetPasswordRequest):
             detail="No account found with that email."
         )
 
-    _check_otp_attempts(payload.email, "password_reset")
+    await _check_otp_attempts(payload.email, "password_reset")
 
     stored_code = profile.get("otp_code")
     if not stored_code:
@@ -609,7 +624,7 @@ async def reset_password(payload: ResetPasswordRequest):
         )
 
     if stored_code != payload.otp_code:
-        _register_otp_failure(payload.email, "password_reset")
+        await _register_otp_failure(payload.email, "password_reset")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Incorrect reset code."
@@ -619,7 +634,7 @@ async def reset_password(payload: ResetPasswordRequest):
     if expires_at:
         expires_dt = datetime.fromisoformat(expires_at)
         if expires_dt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-            _register_otp_failure(payload.email, "password_reset")
+            await _register_otp_failure(payload.email, "password_reset")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Reset code has expired. Please request a new one."
@@ -650,7 +665,7 @@ async def reset_password(payload: ResetPasswordRequest):
         "otp_purpose": None,
     }).eq("id", profile["id"]).execute()
 
-    _clear_otp_attempts(payload.email, "password_reset")
+    await _clear_otp_attempts(payload.email, "password_reset")
 
     return {"message": "Password updated successfully. You can now log in with your new password."}
 
@@ -703,26 +718,14 @@ async def logout(user=Depends(get_current_user)):
 async def google_login(payload: GoogleLoginRequest):
     """
     Authenticate (or register) a user via Google Sign-In.
-
-    **How to use from the frontend:**
-    1. Trigger Google's Identity Services SDK or OAuth2 flow.
-    2. Receive the `credential` (ID Token JWT) from Google.
-    3. POST it here as `{ "id_token": "<jwt>", "role": "customer" }`.
-
-    Supabase validates the JWT against Google's public keys, creates the
-    `auth.users` entry if it is the first login, and returns a full session
-    identical in shape to `POST /auth/login`.
-
-    **Prerequisites (one-time setup):**
-    - Enable the Google provider in your Supabase Auth dashboard.
-    - Add your `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in Supabase.
     """
-    allowed_roles = {"customer", "vendor", "logist"}
+    allowed_roles = {"customer", "vendor", "logist", "rider", "driver", "courier"}
     if payload.role not in allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid role. Must be one of: {allowed_roles}",
+            detail=f"Invalid role. Must be one of: {sorted(allowed_roles)}",
         )
+    canonical_role = canonicalize_role(payload.role) or payload.role
 
     # 1. Exchange Google ID token for a Supabase session
     try:
@@ -764,12 +767,14 @@ async def google_login(payload: GoogleLoginRequest):
             or (user.email.split("@")[0] if user.email else "User")
         )
         avatar_url = meta.get("avatar_url") or meta.get("picture")
+        initial_status = "Pending Approval" if canonical_role == "vendor" else "Active"
 
         new_profile: dict = {
             "id":             user_id,
             "email":          user.email or "",
             "full_name":      full_name,
-            "role":           payload.role,
+            "role":           canonical_role,
+            "status":         initial_status,
             "wallet_balance": 0,
         }
         if avatar_url:
@@ -777,18 +782,18 @@ async def google_login(payload: GoogleLoginRequest):
 
         try:
             supabase_admin.table("profiles").insert(new_profile).execute()
-            profile_data = {"role": payload.role, "full_name": full_name, "wallet_balance": 0}
+            profile_data = {"role": canonical_role, "full_name": full_name, "wallet_balance": 0}
         except Exception as exc:
             # Auth session is still valid — log and continue
             print(f"[WARN] Google profile auto-create failed for {user_id}: {exc}")
-            profile_data = {"role": payload.role, "full_name": "", "wallet_balance": 0}
+            profile_data = {"role": canonical_role, "full_name": "", "wallet_balance": 0}
             full_name = ""
 
         # Send welcome notifications for new accounts (best-effort)
         try:
-            if payload.role == "customer":
+            if canonical_role == "customer":
                 send_welcome_customer.delay(user.email, profile_data["full_name"])
-            elif payload.role == "vendor":
+            elif canonical_role == "vendor":
                 send_welcome_vendor.delay(user.email, profile_data["full_name"])
                 send_admin_new_vendor.delay(
                     ADMIN_EMAIL,

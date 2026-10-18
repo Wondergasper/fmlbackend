@@ -21,6 +21,7 @@ from services.email import (
     send_product_approved,
     send_product_rejected,
 )
+from services.notification_service import create_notification
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -37,6 +38,9 @@ class ProductCreate(BaseModel):
     origin: str
     description: Optional[str] = None
     image_url: Optional[str] = None
+    unit: Optional[str] = None
+    is_organic: Optional[bool] = None
+    harvest_date: Optional[str] = None
 
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
@@ -46,6 +50,9 @@ class ProductUpdate(BaseModel):
     origin: Optional[str] = None
     description: Optional[str] = None
     image_url: Optional[str] = None
+    unit: Optional[str] = None
+    is_organic: Optional[bool] = None
+    harvest_date: Optional[str] = None
 
 class ProductStatusUpdate(BaseModel):
     status: str   # "Approved" | "Pending Approval" | "Rejected"
@@ -53,6 +60,17 @@ class ProductStatusUpdate(BaseModel):
 
 class ProductImageUpdate(BaseModel):
     image_url: str   # Public URL returned by POST /uploads/image
+
+
+def _first_row(res) -> Optional[dict]:
+    """Safely extract the first row whether res.data is a list or a dict."""
+    if not res or not res.data:
+        return None
+    if isinstance(res.data, list):
+        return res.data[0] if res.data else None
+    if isinstance(res.data, dict):
+        return res.data
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +91,7 @@ async def get_products(
     """
     query = (
         supabase_admin.table("products")
-        .select("*, vendor:profiles!vendor_id(status)")
+        .select("*, vendor:profiles!vendor_id(status, farm_name, full_name, location)")
         .eq("status", "Approved")
         .eq("vendor.status", "Active")
     )
@@ -93,22 +111,62 @@ async def get_products(
     return res.data or []
 
 
+@router.get("/me")
+async def get_my_products(user=Depends(require_role(["vendor", "admin"]))):
+    """
+    Vendor/Admin: list all products belonging to the authenticated vendor
+    (including Pending Approval, Approved, and Rejected items).
+    """
+    res = (
+        supabase_admin.table("products")
+        .select("*")
+        .eq("vendor_id", user.id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def list_product(
     product: ProductCreate,
     user=Depends(require_role(["vendor", "admin"]))
 ):
     """Vendors or Admins upload a new product listing."""
-    product_data = product.model_dump()
-    product_data["vendor_id"] = user.id
+    core_fields = {
+        "name": product.name,
+        "category": product.category,
+        "price": product.price,
+        "stock": product.stock,
+        "origin": product.origin,
+        "description": product.description,
+        "image_url": product.image_url,
+        "vendor_id": user.id,
+    }
     # Admin uploads are auto-approved; vendor submissions go to Pending Approval
     profile_res = supabase.table("profiles").select("role, email, full_name").eq("id", user.id).execute()
-    profile_data = profile_res.data[0] if profile_res.data else None
+    profile_data = _first_row(profile_res)
     role = profile_data.get("role") if profile_data else "vendor"
-    product_data["status"] = "Approved" if role == "admin" else "Pending Approval"
+    core_fields["status"] = "Approved" if role == "admin" else "Pending Approval"
 
-    res = supabase_admin.table("products").insert(product_data).execute()
-    new_product = res.data[0]
+    extended_fields = {
+        k: v
+        for k, v in {
+            "unit": product.unit,
+            "is_organic": product.is_organic,
+            "harvest_date": product.harvest_date,
+        }.items()
+        if v is not None
+    }
+
+    try:
+        res = supabase_admin.table("products").insert({**core_fields, **extended_fields}).execute()
+    except Exception:
+        res = supabase_admin.table("products").insert(core_fields).execute()
+
+    new_product = _first_row(res) or {}
+    for k, v in extended_fields.items():
+        new_product.setdefault(k, v)
 
     # ── Email notification (vendors only — admins are auto-approved) ─────────
     if role == "vendor" and profile_data:
@@ -130,9 +188,10 @@ async def get_product(product_id: str):
     except Exception as exc:
         print(f"[ERROR] get_product failed for {product_id}: {exc}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
-    if not res.data:
+    row = _first_row(res)
+    if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
-    return res.data[0]
+    return row
 
 
 @router.patch("/{product_id}")
@@ -145,26 +204,34 @@ async def update_product(
     Update a product. Vendors may only update their own listings.
     Admins may update any product.
     """
-    # Fetch existing product
-    existing = supabase.table("products").select("vendor_id").eq("id", product_id).single().execute()
-    if not existing.data:
+    existing_res = supabase.table("products").select("vendor_id").eq("id", product_id).execute()
+    existing_row = _first_row(existing_res)
+    if not existing_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
 
-    # Role check
-    profile = supabase.table("profiles").select("role").eq("id", user.id).single().execute()
-    role = profile.data.get("role") if profile.data else "customer"
+    profile_res = supabase.table("profiles").select("role").eq("id", user.id).execute()
+    profile_row = _first_row(profile_res)
+    role = profile_row.get("role") if profile_row else getattr(user, "role", "customer")
 
-    if role == "vendor" and existing.data.get("vendor_id") != user.id:
+    if role == "vendor" and existing_row.get("vendor_id") != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only edit your own products.")
     if role == "customer":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
 
-    update_data = {k: v for k, v in payload.model_dump().items() if v is not None}
-    if not update_data:
+    raw_updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not raw_updates:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided to update.")
 
-    res = supabase_admin.table("products").update(update_data).eq("id", product_id).execute()
-    return {"message": "Product updated successfully.", "data": res.data[0] if res.data else None}
+    core_keys = {"name", "category", "price", "stock", "origin", "description", "image_url"}
+    core_updates = {k: v for k, v in raw_updates.items() if k in core_keys}
+
+    try:
+        res = supabase_admin.table("products").update(raw_updates).eq("id", product_id).execute()
+    except Exception:
+        res = supabase_admin.table("products").update(core_updates or raw_updates).eq("id", product_id).execute()
+
+    updated_row = _first_row(res)
+    return {"message": "Product updated successfully.", "data": updated_row}
 
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -172,14 +239,16 @@ async def delete_product(product_id: str, user=Depends(get_current_user)):
     """
     Delete a product. Vendors may only delete their own. Admins may delete any.
     """
-    existing = supabase.table("products").select("vendor_id").eq("id", product_id).single().execute()
-    if not existing.data:
+    existing_res = supabase.table("products").select("vendor_id").eq("id", product_id).execute()
+    existing_row = _first_row(existing_res)
+    if not existing_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
 
-    profile = supabase.table("profiles").select("role").eq("id", user.id).single().execute()
-    role = profile.data.get("role") if profile.data else "customer"
+    profile_res = supabase.table("profiles").select("role").eq("id", user.id).execute()
+    profile_row = _first_row(profile_res)
+    role = profile_row.get("role") if profile_row else getattr(user, "role", "customer")
 
-    if role == "vendor" and existing.data.get("vendor_id") != user.id:
+    if role == "vendor" and existing_row.get("vendor_id") != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own products.")
     if role == "customer":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
@@ -196,27 +265,22 @@ async def update_product_image(
 ):
     """
     Update the image URL of a product listing.
-
-    Typical flow:
-      1. Vendor calls POST /uploads/image with the image file  → receives a public URL
-      2. Vendor calls PATCH /products/{id}/image with { "image_url": "<url>" }
-
-    Vendors may only update images for their own products.
-    Admins may update any product.
     """
-    existing = supabase.table("products").select("vendor_id").eq("id", product_id).single().execute()
-    if not existing.data:
+    existing_res = supabase.table("products").select("vendor_id").eq("id", product_id).execute()
+    existing_row = _first_row(existing_res)
+    if not existing_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
 
-    profile = supabase.table("profiles").select("role").eq("id", user.id).single().execute()
-    role = profile.data.get("role") if profile.data else "customer"
+    profile_res = supabase.table("profiles").select("role").eq("id", user.id).execute()
+    profile_row = _first_row(profile_res)
+    role = profile_row.get("role") if profile_row else getattr(user, "role", "customer")
 
-    if role == "vendor" and existing.data.get("vendor_id") != user.id:
+    if role == "vendor" and existing_row.get("vendor_id") != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only update your own products.")
     if role == "customer":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
 
-    res = supabase_admin.table("products").update({"image_url": payload.image_url}).eq("id", product_id).execute()
+    supabase_admin.table("products").update({"image_url": payload.image_url}).eq("id", product_id).execute()
     return {"message": "Product image updated successfully.", "image_url": payload.image_url}
 
 
@@ -265,5 +329,23 @@ async def update_product_status(
                 send_product_rejected.delay(
                     v_email, v_name, p_name, product_id, payload.reason,
                 )
+
+        # In-app persistent notification for vendor
+        status_title = "Product Approved" if payload.status == "Approved" else f"Product {payload.status}"
+        p_name = product_data.get("name", "Your product")
+        reason_suffix = f" Reason: {payload.reason}" if payload.reason else ""
+        msg = (
+            f"Your product '{p_name}' has been approved and is now live."
+            if payload.status == "Approved"
+            else f"Your product '{p_name}' was updated to '{payload.status}'.{reason_suffix}"
+        )
+        await create_notification(
+            user_id=vendor_id,
+            title=status_title,
+            message=msg,
+            type="product",
+            link="/dashboard/products",
+            metadata={"product_id": product_id, "status": payload.status},
+        )
 
     return {"message": f"Product status set to '{payload.status}'.", "product_id": product_id}
