@@ -13,6 +13,8 @@ Endpoints:
 """
 
 import os
+import httpx
+from gotrue.errors import AuthRetryableError
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -162,6 +164,9 @@ async def register(payload: RegisterRequest):
             "email": payload.email,
             "password": payload.password,
         })
+    except (httpx.TransportError, AuthRetryableError):
+        raise HTTPException(503, "Account service is temporarily unavailable. Please try again later.",
+                            headers={"Retry-After": "5"}) from None
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -248,6 +253,9 @@ async def login(payload: LoginRequest):
             "email": payload.email,
             "password": payload.password,
         })
+    except (httpx.TransportError, AuthRetryableError):
+        raise HTTPException(503, "Account service is temporarily unavailable. Please try again later.",
+                            headers={"Retry-After": "5"}) from None
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

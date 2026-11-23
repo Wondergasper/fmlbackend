@@ -129,3 +129,27 @@ python test/run_offline.py
 
 The runner substitutes dummy Supabase credentials and blocks real HTTP transports;
 mock provider transports and in-process FastAPI requests remain available.
+
+## Render connection troubleshooting
+
+The production storefront origins `https://farmersmarketltd.com` and
+`https://www.farmersmarketltd.com` are explicitly allowed by the backend, including
+when a legacy `CORS_ORIGINS` environment value is present. `CORS_ORIGINS` supplies
+additional clients; entries are comma-separated origins, without page paths.
+Browser origins do not include a trailing slash. Other domains remain blocked.
+
+`httpx.ConnectError: [Errno -2] Name or service not known` during a PostgREST query
+means the deployment could not resolve an upstream hostname. Check Render's
+`SUPABASE_URL` against the project's **Data API URL** in Supabase. Use
+`https://<project-ref>.supabase.co`, not a PostgreSQL connection string, dashboard
+URL, project display name, or an internal database hostname. The public and service
+keys must belong to that same project. Do not post secret keys in logs or chat.
+If the URL is correct, verify DNS resolution and outbound connectivity from the
+Render service before changing credentials or queries.
+
+`GET /health/ready` checks an actual Supabase query using the configured service
+client: it returns 200 when the database is reachable and 503 when unavailable.
+The root health endpoint supports GET and HEAD as a process liveness check.
+Transport failures return 503 with Retry-After instead of exposing a traceback;
+authentication connection failures are distinguished from invalid credentials.
+These responses do not repair DNS or deployment environment values.

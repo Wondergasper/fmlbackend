@@ -1,13 +1,17 @@
 import logging
+import httpx
+from gotrue.errors import AuthRetryableError
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from routers import savings, products, auth, orders, vendors, wallet, analytics, uploads, websockets, disputes, admin, logistics, notifications
 from config import settings
 from services.email import send_weekly_vendor_digest
 from services.rate_limiter import RateLimitMiddleware, init_redis, close_redis
 from services.websocket_manager import connection_manager
-from database import supabase
+from database import supabase, supabase_admin
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +137,7 @@ app.add_middleware(RateLimitMiddleware)
 
 # 2️⃣  CORSMiddleware is added last → it is outermost → handles OPTIONS preflights
 #     before any other middleware sees the request.  This fixes the 400 on OPTIONS.
-cors_origins = [o.strip() for o in settings.cors_origins.split(",")]
+cors_origins = settings.allowed_cors_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -162,7 +166,28 @@ app.include_router(notifications.router) # /notifications/ (in-app persistent al
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
-@app.get("/", tags=["health"])
+@app.exception_handler(AuthRetryableError)
+@app.exception_handler(httpx.TransportError)
+async def upstream_connection_error(request, exc):
+    # No URLs, keys, tokens or provider response bodies in client errors or logs.
+    logger.error("Upstream connection unavailable: %s", type(exc).__name__)
+    return JSONResponse(status_code=503,
+                        content={"detail": "A required service is temporarily unavailable. Please try again later."},
+                        headers={"Retry-After": "5"})
+
+
+@app.get("/health/ready", tags=["health"])
+async def readiness_check():
+    try:
+        await run_in_threadpool(lambda: supabase_admin.table("profiles").select("id").limit(1).execute())
+    except Exception as exc:
+        logger.error("Database readiness failed: %s", type(exc).__name__)
+        return JSONResponse(status_code=503, content={"status": "not_ready", "database": "unavailable"},
+                            headers={"Retry-After": "5"})
+    return {"status": "ready", "database": "available"}
+
+
+@app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
 def health_check():
     return {
         "status": "healthy",

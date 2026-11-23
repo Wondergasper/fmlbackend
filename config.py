@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     app_name: str = "Farmers Market API"
     cors_origins: str = "https://farmermarket-brown.vercel.app,https://farmermarket-git-cold-gasper-wonders-projects.vercel.app,http://localhost:5173"
 
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        # The production storefront remains allowed when a deployment still has
+        # an older CORS_ORIGINS value. Environment entries add other clients.
+        storefront = ("https://farmersmarketltd.com", "https://www.farmersmarketltd.com")
+        configured = (origin.strip().rstrip("/") for origin in self.cors_origins.split(","))
+        return list(dict.fromkeys([*storefront, *(origin for origin in configured if origin)]))
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

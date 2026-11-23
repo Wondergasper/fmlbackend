@@ -14,6 +14,8 @@ Exports:
   canonicalize_role  — Normalizes any role or alias to its canonical string.
 """
 
+import httpx
+from gotrue.errors import AuthRetryableError
 from typing import Any, Iterable
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -70,6 +72,9 @@ async def get_current_user(
         return user_response.user
     except HTTPException:
         raise
+    except (httpx.TransportError, AuthRetryableError):
+        raise HTTPException(status_code=503, detail="Account service is temporarily unavailable. Please try again later.",
+                            headers={"Retry-After": "5"}) from None
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
