@@ -65,3 +65,4 @@ pip_install_output.txt
 test_output.txt
 test/test_results.txt
 test/REALITY_TEST_LOG.md
+.venv-marketplace/

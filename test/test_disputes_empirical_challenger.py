@@ -226,7 +226,7 @@ def test_double_refund_exploit_on_duplicate_dispute():
             return create_mock_db_chain([{"id": "mock_res"}])
         return create_mock_db_chain([])
 
-    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase") as mock_dep_sp:
+    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase_admin") as mock_dep_sp:
         mock_sp.table.side_effect = table_side_effect
         mock_sp_admin.table.side_effect = admin_table_side_effect
         mock_dep_sp.table.return_value = create_mock_db_chain({"role": "admin"})
@@ -395,7 +395,7 @@ def test_resolve_split_rounding_precision_loss():
             return create_mock_db_chain([{"id": "res_mock"}])
         return create_mock_db_chain([])
 
-    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase") as mock_dep_sp:
+    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase_admin") as mock_dep_sp:
         mock_sp.table.side_effect = table_side_effect
         mock_sp_admin.table.side_effect = admin_table_side_effect
         mock_dep_sp.table.return_value = create_mock_db_chain({"role": "admin"})

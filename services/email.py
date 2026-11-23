@@ -2,8 +2,8 @@
 services/email.py — Farm-Connect Email Notification Service
 
 Sends transactional emails via Resend.ai (primary) with SendGrid and SMTP fallbacks.
-All functions are fire-and-forget safe: errors are logged but never raised,
-so a failed email never crashes the API response.
+Ordinary notifications log delivery failures. OTP emails raise on failure so
+requests can report errors and queued tasks can retry.
 
 Environment variables required (.env):
   RESEND_API_KEY         — Resend.ai API key
@@ -16,7 +16,7 @@ Optional SMTP fallback (used when SENDGRID_API_KEY is not set):
   SMTP_HOST               — e.g. smtp.gmail.com
   SMTP_PORT               — e.g. 587
   SMTP_USER               — Your Gmail / SMTP username
-  SMTP_PASS               — App password
+  SMTP_PASSWORD           — App password
 
 Supported notifications (15 total):
   Account  : welcome_customer, welcome_vendor, admin_new_vendor,
@@ -266,39 +266,55 @@ def _send_via_smtp(to: str, subject: str, html: str) -> None:
         server.sendmail(FROM_EMAIL, to, msg.as_string())
 
 
-def send_email(to: str, subject: str, html: str) -> None:
+class EmailDeliveryError(RuntimeError):
+    """No configured provider accepted the email."""
+
+
+def _configured(value: str) -> bool:
+    value = value.strip().lower()
+    return bool(value) and not value.startswith(
+        ("replace-", "re_replace-", "sg.replace-", "your", "re_your")
+    )
+
+
+def send_email(to: str, subject: str, html: str, *, raise_on_failure: bool = False) -> None:
     """
     Send a transactional email. Tries Resend.ai first, falls back to SendGrid and SMTP.
-    Errors are logged but never raised so the API response is never blocked.
+    Set raise_on_failure for critical emails that require confirmed provider acceptance.
     """
     if not to:
         logger.warning("[email] Skipped — no recipient address provided.")
+        if raise_on_failure:
+            raise EmailDeliveryError("No recipient address provided")
         return
 
     transports = []
     # Skip default placeholder keys
-    if RESEND_API_KEY and not RESEND_API_KEY.startswith("replace-") and not RESEND_API_KEY.startswith("re_replace-"):
+    if _configured(RESEND_API_KEY):
         transports.append(("Resend", _send_via_resend))
-    if SENDGRID_API_KEY and not SENDGRID_API_KEY.startswith("replace-") and not SENDGRID_API_KEY.startswith("SG.replace-"):
+    if _configured(SENDGRID_API_KEY):
         transports.append(("SendGrid", _send_via_sendgrid))
-    if SMTP_USER and not SMTP_USER.startswith("your@") and not SMTP_USER.startswith("replace-"):
+    if _configured(SMTP_USER) and _configured(SMTP_PASS):
         transports.append(("SMTP", _send_via_smtp))
 
     if not transports:
-        logger.warning(f"[email] No transport configured — would send to={to}  subject={subject!r}")
+        logger.warning("[email] No transport configured")
+        if raise_on_failure:
+            raise EmailDeliveryError("No email transport configured")
         return
 
-    errors = []
     for name, send_fn in transports:
         try:
             send_fn(to, subject, html)
-            logger.info(f"[email] {name} ✓  to={to}  subject={subject!r}")
+            logger.info("[email] %s accepted email", name)
             return
         except Exception as exc:
-            logger.warning(f"[email] {name} failed for to={to}  subject={subject!r}: {exc}")
-            errors.append(f"{name}: {exc}")
+            # Never log the subject/body: verification subjects contain OTPs.
+            logger.warning("[email] %s failed: %s", name, exc)
 
-    logger.error(f"[email] FAILED all transports. to={to}  subject={subject!r}  errors={', '.join(errors)}")
+    logger.error("[email] All configured transports failed")
+    if raise_on_failure:
+        raise EmailDeliveryError("All configured email transports failed")
 
 
 
@@ -330,7 +346,7 @@ def send_otp_email(email: str, name: str, otp_code: str) -> None:
     </p>
     {_btn("Go to Farm-Connect →", FRONTEND_URL)}
     """
-    send_email(email, f"Your Farm-Connect verification code: {otp_code}", _base_html("OTP Verification", body))
+    send_email(email, f"Your Farm-Connect verification code: {otp_code}", _base_html("OTP Verification", body), raise_on_failure=True)
 
 
 # ===========================================================================
@@ -981,4 +997,5 @@ def send_password_reset_email(to_email: str, full_name: str, otp_code: str) -> N
         to_email,
         "🔐 Your Farm-Connect Password Reset Code",
         _base_html("Password Reset", body),
+        raise_on_failure=True,
     )

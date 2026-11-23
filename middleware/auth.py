@@ -17,7 +17,7 @@ Exports:
 from typing import Any, Iterable
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from database import supabase
+from database import supabase, supabase_admin
 from schemas.auth import Role, ROLE_ALIASES, canonicalize_role
 
 # auto_error=False lets us return a descriptive 401 instead of FastAPI's
@@ -101,46 +101,17 @@ def require_role(allowed_roles: list[str] | set[str] | str):
     expanded_roles_set = _expand_roles(raw_roles)
 
     async def dependency(user: Any = Depends(get_current_user)):
-        # 1. Fast-path: Check if user object already specifies role (e.g. test fixtures, token claims)
-        role_attr = getattr(user, "role", None)
-        if isinstance(role_attr, str):
-            canonical_role_attr = canonicalize_role(role_attr)
-            if role_attr.lower() in expanded_roles_set or (canonical_role_attr and canonical_role_attr in expanded_roles_set):
-                return user
-        else:
-            role_attr = None
-
-        # 2. Check dependencies.supabase (for tests patching dependencies.supabase) then database.supabase
+        # Authorization always comes from trusted records, never token attributes or IDs.
         import dependencies
-        db = getattr(dependencies, "supabase", supabase)
-
-        profile_data = None
-        actual_role = None
+        db = getattr(dependencies, "supabase_admin", supabase_admin)
         try:
-            profile_res = (
-                db.table("profiles")
-                .select("*")
-                .eq("id", user.id)
-                .execute()
-            )
+            profile_res = db.table("profiles").select("*").eq("id", user.id).execute()
             profile_data = profile_res.data[0] if profile_res.data else None
-            if profile_data:
-                actual_role = profile_data.get("role")
         except Exception:
-            # If DB rejects non-UUID (e.g. "admin-001" in test fixtures), check mock conventions
-            uid = str(getattr(user, "id", "")).lower()
-            if "admin" in uid:
-                actual_role = "admin"
-            elif "vend" in uid:
-                actual_role = "vendor"
-            elif "logist" in uid:
-                actual_role = "logist"
-            elif any(k in uid for k in ("driver", "rider", "courier")):
-                actual_role = "rider"
-            elif "cust" in uid:
-                actual_role = "customer"
-            else:
-                actual_role = role_attr
+            raise HTTPException(status_code=503, detail="Unable to verify account permissions.") from None
+        actual_role = profile_data.get("role") if profile_data else None
+        if profile_data and profile_data.get("status") == "Suspended":
+            raise HTTPException(status_code=403, detail="Account suspended.")
 
         canonical_actual = canonicalize_role(actual_role) if actual_role else None
         is_allowed = False

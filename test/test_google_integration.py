@@ -425,7 +425,7 @@ class TestAssignDriver(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "admin"}])
             mock_sp.table.return_value = _chain([{"role": "admin"}])
 
@@ -459,7 +459,7 @@ class TestAssignDriver(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "driver"}])
             mock_sp.table.return_value = _chain([{"role": "driver"}])
 
@@ -491,7 +491,7 @@ class TestAssignDriver(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: driver
 
         with patch("routers.orders.supabase") as mock_sp, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "driver"}])
             mock_sp.table.return_value = _chain([{"role": "driver"}])
 
@@ -511,7 +511,7 @@ class TestAssignDriver(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: customer
 
         with patch("routers.orders.supabase") as mock_sp, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "customer"}])
             mock_sp.table.return_value = _chain([{"role": "customer"}])
 
@@ -532,7 +532,7 @@ class TestAssignDriver(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "admin"}])
             mock_sp.table.return_value = _chain([{"role": "admin"}])
             # driver lookup returns a customer role
@@ -555,7 +555,7 @@ class TestAssignDriver(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "admin"}])
             mock_sp.table.return_value = _chain([{"role": "admin"}])
 
@@ -595,7 +595,7 @@ class TestDriverLocationUpdate(unittest.TestCase):
              patch("routers.orders.supabase_admin") as mock_admin, \
              patch("routers.orders.get_distance_and_eta", new_callable=AsyncMock) as mock_eta, \
              patch("routers.orders.connection_manager") as mock_ws, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
 
             mock_dep.table.return_value = _chain([{"role": "driver"}])
             mock_sp.table.return_value = _chain([{"role": "driver"}])
@@ -633,7 +633,7 @@ class TestDriverLocationUpdate(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: driver
 
         with patch("routers.orders.supabase") as mock_sp, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "driver"}])
             mock_sp.table.return_value = _chain([{"role": "driver"}])
 
@@ -654,7 +654,7 @@ class TestDriverLocationUpdate(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "driver"}])
             mock_sp.table.return_value = _chain([{"role": "driver"}])
             # Order is assigned to driver-001, not driver-002
@@ -682,7 +682,7 @@ class TestDriverLocationUpdate(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: customer
 
         with patch("routers.orders.supabase") as mock_sp, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "customer"}])
             mock_sp.table.return_value = _chain([{"role": "customer"}])
 
@@ -727,7 +727,7 @@ class TestOrderTracking(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "customer"}])
             mock_sp.table.return_value = _chain([{"role": "customer"}])
             mock_admin.table.return_value = _chain([self._order_row()])
@@ -750,7 +750,7 @@ class TestOrderTracking(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "admin"}])
             mock_sp.table.return_value = _chain([{"role": "admin"}])
             mock_admin.table.return_value = _chain([self._order_row(customer_id="someone-else")])
@@ -769,7 +769,7 @@ class TestOrderTracking(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
             mock_dep.table.return_value = _chain([{"role": "customer"}])
             mock_sp.table.return_value = _chain([{"role": "customer"}])
             # Order belongs to cust-001, not stranger-999

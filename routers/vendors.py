@@ -72,6 +72,12 @@ async def list_vendors(user=Depends(require_role(["admin"]))):
     return res.data or []
 
 
+@router.get("/me/products")
+async def get_vendor_products(user=Depends(require_role(["vendor"]))):
+    return (supabase_admin.table("products").select("*").eq("vendor_id", user.id)
+            .order("created_at", desc=True).execute().data or [])
+
+
 @router.get("/me/profile")
 async def get_my_vendor_profile(user=Depends(require_role(["vendor"]))):
     """
@@ -178,12 +184,13 @@ async def get_vendor(vendor_id: str):
         .select("id, name, category, price, stock, image_url, status")
         .eq("vendor_id", vendor_id)
         .eq("status", "Approved")
+        .gt("stock", 0)
         .execute()
     )
 
     return {
         "vendor": vendor_data,
-        "products": products.data or [],
+        "products": (products.data or []) if vendor_data.get("status") == "Active" else [],
     }
 
 

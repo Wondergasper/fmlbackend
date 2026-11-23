@@ -54,7 +54,7 @@ class TestStorageUploadEdgeCases(unittest.TestCase):
         mock_supabase.storage.from_.return_value.upload.side_effect = Exception("Connection refused to Supabase Storage")
 
         file_content = b"\xFF\xD8\xFF\xE0\x00\x10JFIF"
-        with patch("dependencies.supabase") as mock_dep_sp:
+        with patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = create_mock_db_chain({"role": "vendor"})
             response = client.post(
                 "/uploads/image",
@@ -80,7 +80,7 @@ class TestStorageUploadEdgeCases(unittest.TestCase):
 
         corrupted_payload = b"<?php echo 'malicious code'; ?> corrupt binary garbage data 12345"
 
-        with patch("routers.uploads.supabase_admin") as mock_supabase, patch("dependencies.supabase") as mock_dep_sp:
+        with patch("routers.uploads.supabase_admin") as mock_supabase, patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = create_mock_db_chain({"role": "vendor"})
             mock_supabase.storage.from_.return_value.upload.return_value = {"path": "products/vendor-123/test.jpg"}
             
@@ -133,7 +133,7 @@ class TestWalletTransactionRollbackEdgeCases(unittest.TestCase):
 
         payload = {"amount_kobo": 50000, "reference": "ref-12345"}
         
-        with patch("dependencies.supabase") as mock_dep_sp:
+        with patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = create_mock_db_chain({"role": "customer"})
             try:
                 response = client.post("/wallet/topup", json=payload)
@@ -212,7 +212,7 @@ class TestWalletTransactionRollbackEdgeCases(unittest.TestCase):
             "resolution_notes": "Releasing funds to vendors after review."
         }
 
-        with patch("dependencies.supabase") as mock_dep_sp:
+        with patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = create_mock_db_chain({"role": "admin"})
             response = client.patch(f"/disputes/{dispute_id}/resolve", json=payload)
 

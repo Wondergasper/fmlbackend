@@ -42,7 +42,7 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 
 class OrderItem(BaseModel):
     product_id: str
-    quantity: int = Field(..., gt=0, description="Quantity must be greater than zero")
+    quantity: int = Field(..., strict=True, gt=0, description="Quantity must be greater than zero")
     unit_price: int  # price in kobo at time of order
 
 class OrderCreate(BaseModel):
@@ -177,11 +177,18 @@ async def place_order(
             detail="Order must contain at least one item."
         )
 
+    from collections import Counter
+    quantities = Counter()
+    for item in payload.items:
+        quantities[item.product_id] += item.quantity
+    if (payload.delivery_type or '').strip().lower() not in {'standard', 'express'}:
+        raise HTTPException(422, "Invalid delivery type.")
+
     # Verify product prices against database (prevent price manipulation)
     product_ids = list(set(item.product_id for item in payload.items))
     products_res = (
         supabase_admin.table("products")
-        .select("id, name, price, stock, status, vendor_id, vendor:profiles!vendor_id(status)")
+        .select("id, name, price, stock, status, vendor_id, vendor:profiles!vendor_id!inner(status)")
         .eq("status", "Approved")
         .eq("vendor.status", "Active")
         .in_("id", product_ids)
@@ -201,7 +208,7 @@ async def place_order(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Product {item.product_id} is not available."
             )
-        if db_prod["stock"] < item.quantity:
+        if db_prod["stock"] < quantities[item.product_id]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Insufficient stock for product '{db_prod.get('name', item.product_id)}'."
@@ -240,21 +247,29 @@ async def place_order(
             detail="Insufficient wallet balance. Please top up before ordering."
         )
 
-    order_data = {
-        "customer_id": user.id,
-        "total_kobo": grand_total_kobo,
-        "delivery_type": normalized_delivery_type,
-        "delivery_address": payload.delivery_address,
-        "notes": payload.notes,
-        "status": "Processing",
-        "payment_status": "Paid",
-    }
-    order_res = supabase_admin.table("orders").insert(order_data).execute()
-    if not order_res.data:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create order.")
-
-    created_order = order_res.data[0]
+    # The database repeats checks while holding locks; no read/write race can
+    # publish a rejected item or partially debit the wallet.
+    try:
+        checkout = supabase_admin.rpc("marketplace_checkout", {
+            "p_customer_id": user.id,
+            "p_items": [{"product_id": pid, "quantity": qty} for pid, qty in quantities.items()],
+            "p_delivery_type": normalized_delivery_type,
+            "p_delivery_address": payload.delivery_address, "p_notes": payload.notes,
+        }).execute().data
+    except Exception as exc:
+        message = str(exc)
+        if "Insufficient wallet balance" in message:
+            raise HTTPException(402, "Insufficient wallet balance.") from None
+        if any(text in message for text in ("Product unavailable", "Vendor is not active", "Customer account is not active")):
+            raise HTTPException(409, "Product or account availability changed. Refresh your cart.") from None
+        logger.error("Atomic checkout failed")
+        raise HTTPException(503, "Checkout could not be completed.") from None
+    created_order = checkout["order"]
     order_id = created_order["id"]
+    total_kobo = checkout["subtotal_kobo"]
+    delivery_fee = checkout["delivery_fee_kobo"]
+    grand_total_kobo = checkout["total_kobo"]
+    new_balance = checkout["new_wallet_balance"]
 
     # Geocode delivery address to coordinates (non-blocking, best-effort)
     try:
@@ -266,42 +281,6 @@ async def place_order(
             ).eq("id", order_id).execute()
     except Exception as geo_exc:
         logger.warning(f"[orders] Geocoding failed for order {order_id}: {geo_exc}")
-
-    # Create order_items (use DB price, not client-provided)
-    items_data = [
-        {
-            "order_id": order_id,
-            "product_id": item.product_id,
-            "quantity": item.quantity,
-            "unit_price_kobo": db_products[item.product_id]["price"],
-        }
-        for item in payload.items
-    ]
-    supabase_admin.table("order_items").insert(items_data).execute()
-
-    # Decrement product stock for each ordered item
-    for item in payload.items:
-        prev_stock = db_products[item.product_id]["stock"]
-        supabase_admin.table("products").update(
-            {"stock": prev_stock - item.quantity}
-        ).eq("id", item.product_id).execute()
-
-    # Deduct from wallet
-    new_balance = balance - grand_total_kobo
-    supabase_admin.table("profiles").update({"wallet_balance": new_balance}).eq("id", user.id).execute()
-
-    # Record wallet debit transaction (best-effort)
-    try:
-        supabase_admin.table("wallet_transactions").insert({
-            "user_id": user.id,
-            "type": "Debit",
-            "amount_kobo": grand_total_kobo,
-            "reference": f"order_payment_{order_id}",
-            "status": "Success",
-            "description": f"Payment for order #{order_id[:8]}",
-        }).execute()
-    except Exception as tx_exc:
-        logger.warning(f"[orders] Could not log wallet debit for order {order_id}: {tx_exc}")
 
     # ── Email notifications ────────────────────────────────────────────────
     customer_profile_res = (

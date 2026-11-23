@@ -6,22 +6,23 @@ Endpoints:
   POST /auth/login         — Login and receive a JWT access token
   GET  /auth/me            — Get the current authenticated user's profile
   POST /auth/logout        — Invalidate the current session
-  POST /auth/send-otp      — Send a 4-digit OTP code to the user's email
-  POST /auth/verify-otp    — Verify a 4-digit OTP code and mark email as verified
+  POST /auth/send-otp      — Send a 6-digit OTP code to the user's email
+  POST /auth/verify-otp    — Verify a 6-digit OTP code and mark email as verified
   POST /auth/forgot-password — Send password-reset OTP
   POST /auth/reset-password  — Reset password using OTP
 """
 
 import os
 import logging
-import random
+import secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 # Fix #1 — single source of truth: all routes use middleware.auth
 from middleware.auth import get_current_user
-from schemas.auth import Role, ALL_PLATFORM_ROLES, canonicalize_role
+from schemas.auth import Role, ALL_PLATFORM_ROLES, canonicalize_role, BuyerMetadata
 from database import supabase, supabase_admin
 from config import settings
 from services import rate_limiter as _rate_limiter
@@ -107,7 +108,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # Request / Response Models
 # ---------------------------------------------------------------------------
 
-class RegisterRequest(BaseModel):
+class RegisterRequest(BuyerMetadata):
     email: EmailStr
     password: str
     full_name: str
@@ -202,11 +203,15 @@ async def register(payload: RegisterRequest):
         "phone": payload.phone,
         "wallet_balance": 0,
         "status": "Pending Approval" if payload.role == "vendor" else "Active",
+        "account_type": payload.account_type,
+        "business_name": payload.business_name,
+        "business_phone": payload.business_phone,
     }
     try:
         supabase_admin.table("profiles").insert(profile_data).execute()
     except Exception as e:
         logger.warning(f"[auth] Profile insert failed for {user_id}: {e}")
+        raise HTTPException(status_code=503, detail="Account profile could not be saved. Contact support before retrying.") from None
 
     # ── Email notifications ────────────────────────────────────────────────
     if payload.role == "customer":
@@ -420,7 +425,7 @@ class ResetPasswordRequest(BaseModel):
 @router.post("/send-otp", status_code=status.HTTP_200_OK)
 async def send_otp(payload: SendOtpRequest):
     """
-    Generate a 4-digit OTP for email verification, store it on the user's
+    Generate a 6-digit OTP for email verification, store it on the user's
     profile, and send it via email. OTP expires after 10 minutes.
 
     Fix #7 — stores otp_purpose="email_verification" so that
@@ -439,7 +444,7 @@ async def send_otp(payload: SendOtpRequest):
             detail="No account found with this email."
         )
 
-    otp_code = f"{random.randint(0, 999999):06d}"
+    otp_code = f"{secrets.randbelow(1000000):06d}"
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
 
     supabase_admin.table("profiles").update({
@@ -448,22 +453,26 @@ async def send_otp(payload: SendOtpRequest):
         "otp_purpose": "email_verification",  # Fix #7
     }).eq("id", profile["id"]).execute()
 
-    # Best-effort email (fails open — see email.py). When no email domain is
-    # verified (dev), the OTP is also returned directly so the caller can
-    # proceed without relying on delivery.
-    send_otp_email.delay(payload.email, profile["full_name"], otp_code)
+    # Critical OTPs wait for provider acceptance without depending on a worker.
+    try:
+        await run_in_threadpool(
+            send_otp_email.run, payload.email, profile.get("full_name") or "User", otp_code
+        )
+    except Exception:
+        logger.error("[auth] OTP email delivery failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send verification email. Please try again later.",
+        ) from None
 
-    result = {"message": "OTP generated.", "email": payload.email}
-    if settings.environment != "production":
-        result["otp_code"] = otp_code
-        result["note"] = "Email delivery requires a verified domain; use otp_code above for dev."
+    result = {"message": "OTP email accepted for delivery.", "email": payload.email}
     return result
 
 
 @router.post("/verify-otp", status_code=status.HTTP_200_OK)
 async def verify_otp(payload: VerifyOtpRequest):
     """
-    Verify a 4-digit OTP code. Marks the email as verified on success.
+    Verify a 6-digit OTP code. Marks the email as verified on success.
 
     Fix #7 — rejects codes that were issued for password-reset, not
     email-verification, preventing cross-flow OTP reuse.
@@ -560,7 +569,7 @@ async def forgot_password(payload: ForgotPasswordRequest):
     profile = profile_res.data[0] if profile_res.data else None
 
     if profile:
-        otp_code = f"{random.randint(0, 999999):06d}"
+        otp_code = f"{secrets.randbelow(1000000):06d}"
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
 
         supabase_admin.table("profiles").update({
@@ -569,16 +578,16 @@ async def forgot_password(payload: ForgotPasswordRequest):
             "otp_purpose": "password_reset",  # Fix #7
         }).eq("id", profile["id"]).execute()
 
-        # Dispatch password reset email via Celery
+        # Keep the response generic to avoid exposing whether an account exists.
         try:
-            from services.email import send_password_reset_email
-            send_password_reset_email.delay(
+            await run_in_threadpool(
+                send_password_reset_email.run,
                 payload.email,
                 profile.get("full_name") or "User",
                 otp_code,
             )
         except Exception as exc:
-            logger.warning(f"[auth] Failed to queue password reset email: {exc}")
+            logger.error("[auth] Password reset email delivery failed")
 
     # Always return the same response to avoid email enumeration
     return {"message": "If an account exists with that email, a reset code has been sent."}

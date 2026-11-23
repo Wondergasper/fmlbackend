@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import products, auth, orders, vendors, wallet, analytics, uploads, websockets, disputes, admin, logistics, notifications
+from routers import savings, products, auth, orders, vendors, wallet, analytics, uploads, websockets, disputes, admin, logistics, notifications
 from config import settings
 from services.email import send_weekly_vendor_digest
 from services.rate_limiter import RateLimitMiddleware, init_redis, close_redis
@@ -92,6 +92,8 @@ async def lifespan(app: FastAPI):
         scheduler = BackgroundScheduler(timezone="UTC")
         # Every Monday at 07:00 UTC (08:00 WAT)
         scheduler.add_job(_run_weekly_digest, "cron", day_of_week="mon", hour=7, minute=0)
+        from services.savings import reconcile_savings
+        scheduler.add_job(reconcile_savings, "interval", minutes=1, max_instances=1, coalesce=True)
         scheduler.start()
         logger.info("[scheduler] Weekly digest cron started (Mon 07:00 UTC).")
     except ImportError:
@@ -143,6 +145,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
+app.include_router(savings.router)
 app.include_router(auth.router)       # /auth/register, /auth/login, /auth/me
 app.include_router(products.router)   # /products/ (CRUD + status + image)
 app.include_router(orders.router)     # /orders/ (place, list, update status)

@@ -91,20 +91,24 @@ class DummyUser:
             self.role = role
 
 
-def test_require_role_fast_path_with_attribute():
+def test_user_attribute_cannot_grant_database_role():
     dep = require_role(["admin"])
     user = DummyUser("mock-id", role="admin")
-    result = asyncio.run(dep(user))
-    assert result.id == "mock-id"
-    assert result.role == "admin"
+    mock_db = MagicMock()
+    mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [{"role": "customer"}]
+    with patch("dependencies.supabase_admin", mock_db), pytest.raises(HTTPException) as exc:
+        asyncio.run(dep(user))
+    assert exc.value.status_code == 403
 
 
-def test_require_role_fast_path_with_alias():
-    # User object has legacy role 'driver', endpoint requires 'rider'
+def test_require_role_alias_comes_from_database():
     dep = require_role(["rider"])
-    user = DummyUser("mock-id", role="driver")
-    result = asyncio.run(dep(user))
-    assert result.id == "mock-id"
+    user = DummyUser("mock-id", role="admin")
+    mock_db = MagicMock()
+    mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [{"role": "driver"}]
+    with patch("dependencies.supabase_admin", mock_db):
+        result = asyncio.run(dep(user))
+    assert result.role == "rider"
 
 
 def test_require_role_db_lookup_success():
@@ -116,7 +120,7 @@ def test_require_role_db_lookup_success():
         {"id": user.id, "role": "logist", "full_name": "Hub Dispatcher"}
     ]
 
-    with patch("dependencies.supabase", mock_db):
+    with patch("dependencies.supabase_admin", mock_db):
         result = asyncio.run(dep(user))
         assert result.id == user.id
         assert result.role == "logist"
@@ -133,7 +137,7 @@ def test_require_role_db_lookup_alias_resolution():
         {"id": user.id, "role": "courier", "full_name": "Bike Courier"}
     ]
 
-    with patch("dependencies.supabase", mock_db):
+    with patch("dependencies.supabase_admin", mock_db):
         result = asyncio.run(dep(user))
         assert result.id == user.id
         # Canonical role cached
@@ -149,7 +153,7 @@ def test_require_role_forbidden():
         {"id": user.id, "role": "customer", "full_name": "Buyer"}
     ]
 
-    with patch("dependencies.supabase", mock_db):
+    with patch("dependencies.supabase_admin", mock_db):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(dep(user))
         assert exc_info.value.status_code == 403
@@ -166,7 +170,7 @@ def test_require_role_logist_accesses_hubs_not_blocked_as_courier():
         {"id": user.id, "role": "logist", "full_name": "Logistics Lead"}
     ]
 
-    with patch("dependencies.supabase", mock_db):
+    with patch("dependencies.supabase_admin", mock_db):
         result = asyncio.run(dep(user))
         assert result.role == "logist"
 
@@ -174,7 +178,10 @@ def test_require_role_logist_accesses_hubs_not_blocked_as_courier():
 def test_require_any_role_variadic():
     dep = require_any_role("vendor", "admin")
     user = DummyUser("mock-id", role="vendor")
-    result = asyncio.run(dep(user))
+    mock_db = MagicMock()
+    mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [{"role": "vendor"}]
+    with patch("dependencies.supabase_admin", mock_db):
+        result = asyncio.run(dep(user))
     assert result.role == "vendor"
 
 

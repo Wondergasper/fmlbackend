@@ -4,6 +4,7 @@ All variables can be set with or without the `FM_` prefix.
 Existing unprefixed names (SUPABASE_URL, etc.) work for backward compatibility.
 """
 
+from typing import Literal
 from pydantic_settings import BaseSettings
 
 
@@ -44,6 +45,11 @@ class Settings(BaseSettings):
     geo_provider: str = "osrm"  # "osrm" | "google" | "haversine"
     geo_min_distance_update_meters: float = 100.0
     geo_min_time_update_seconds: int = 30
+
+    # Cowrywise: server-only credentials; disabled until configured.
+    cowrywise_client_id: str = ""
+    cowrywise_client_secret: str = ""
+    cowrywise_mode: Literal["sandbox", "production"] = "sandbox"
 
     # App
     environment: str = "development"

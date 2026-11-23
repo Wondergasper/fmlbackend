@@ -388,7 +388,7 @@ def test_admin_resolve_dispute_refund_buyer():
     }
     profile_mock = {"wallet_balance": 100000}
 
-    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase") as mock_dep_sp:
+    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase_admin") as mock_dep_sp:
         def table_side_effect(table_name):
             if table_name == "disputes":
                 return create_mock_db_chain(existing_dispute)
@@ -443,7 +443,7 @@ def test_admin_resolve_dispute_multi_vendor_release():
         ]
     }
 
-    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase") as mock_dep_sp:
+    with patch("routers.disputes.supabase") as mock_sp, patch("routers.disputes.supabase_admin") as mock_sp_admin, patch("dependencies.supabase_admin") as mock_dep_sp:
         def table_side_effect(table_name):
             if table_name == "disputes":
                 return create_mock_db_chain(existing_dispute)
@@ -476,7 +476,7 @@ def test_resolve_dispute_missing_notes_or_outcome():
     """Verify resolving dispute without outcome or notes returns 400."""
     app.dependency_overrides[get_current_user] = lambda: mock_admin
 
-    with patch("dependencies.supabase") as mock_dep_sp:
+    with patch("dependencies.supabase_admin") as mock_dep_sp:
         mock_dep_sp.table.return_value = create_mock_db_chain({"role": "admin"})
         response = client.patch("/disputes/disp_001/resolve", json={"resolution_outcome": "", "resolution_notes": ""})
         assert response.status_code == 400

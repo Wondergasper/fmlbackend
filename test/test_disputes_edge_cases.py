@@ -50,7 +50,7 @@ def test_edge_case_1_non_admin_resolution():
     """Verify non-admin user cannot resolve disputes."""
     app.dependency_overrides[get_current_user] = lambda: mock_customer
 
-    with patch("dependencies.supabase") as mock_dep_sp:
+    with patch("dependencies.supabase_admin") as mock_dep_sp:
         mock_dep_sp.table.return_value = create_mock_db_chain({"role": "customer"})
         response = client.patch("/disputes/disp_001/resolve", json={
             "resolution_outcome": "Refund Buyer",
@@ -67,7 +67,7 @@ def test_edge_case_2_whitespace_resolution_notes():
     """Verify resolution notes with only whitespace are rejected with 400 Bad Request."""
     app.dependency_overrides[get_current_user] = lambda: mock_admin
 
-    with patch("dependencies.supabase") as mock_dep_sp:
+    with patch("dependencies.supabase_admin") as mock_dep_sp:
         mock_dep_sp.table.return_value = create_mock_db_chain({"role": "admin"})
         payload = {
             "resolution_outcome": "Refund Buyer",
@@ -113,7 +113,7 @@ def test_edge_case_4_resolving_already_resolved_dispute_double_reconciliation():
 
     already_resolved_dispute = {"id": "disp_resolved_999", "order_id": "ord_555", "status": "Resolved"}
 
-    with patch("routers.disputes.supabase") as mock_sp, patch("dependencies.supabase") as mock_dep_sp:
+    with patch("routers.disputes.supabase") as mock_sp, patch("dependencies.supabase_admin") as mock_dep_sp:
         def table_side_effect(table_name):
             if table_name == "disputes":
                 return create_mock_db_chain(already_resolved_dispute)

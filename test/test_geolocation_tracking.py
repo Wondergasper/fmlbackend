@@ -131,7 +131,7 @@ class TestGeolocationAPIAndHistory(unittest.TestCase):
              patch("routers.orders.supabase_admin") as mock_admin, \
              patch("routers.orders.get_distance_and_eta", new_callable=AsyncMock) as mock_eta, \
              patch("routers.orders.connection_manager") as mock_ws, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
 
             mock_dep.table.return_value = _chain([{"role": "driver"}])
             mock_sp.table.return_value = _chain([{"role": "driver"}])
@@ -181,7 +181,7 @@ class TestGeolocationAPIAndHistory(unittest.TestCase):
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
              patch("routers.orders.connection_manager") as mock_ws, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
 
             mock_dep.table.return_value = _chain([{"role": "driver"}])
             mock_sp.table.return_value = _chain([{"role": "driver"}])
@@ -232,7 +232,7 @@ class TestGeolocationAPIAndHistory(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
 
             mock_dep.table.return_value = _chain([{"role": "customer"}])
             mock_sp.table.return_value = _chain([{"role": "customer"}])
@@ -266,7 +266,7 @@ class TestGeolocationAPIAndHistory(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
 
             mock_dep.table.return_value = _chain([{"role": "customer"}])
             mock_sp.table.return_value = _chain([{"role": "customer"}])
@@ -289,7 +289,7 @@ class TestGeolocationAPIAndHistory(unittest.TestCase):
 
         with patch("routers.orders.supabase") as mock_sp, \
              patch("routers.orders.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep:
+             patch("dependencies.supabase_admin") as mock_dep:
 
             mock_dep.table.return_value = _chain([{"role": "admin"}])
             mock_sp.table.return_value = _chain([{"role": "admin"}])

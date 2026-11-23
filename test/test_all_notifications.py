@@ -116,7 +116,7 @@ def test_02_register_vendor_triggers_welcome_and_admin_email(mock_admin_notify, 
 @patch("routers.vendors.supabase")
 @patch("routers.vendors.supabase_admin")
 @patch("routers.vendors.send_vendor_approved.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_03_approve_vendor_triggers_approved_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """PATCH /vendors/{id}/status → Active → send_vendor_approved.delay"""
     app.dependency_overrides[get_current_user] = lambda: ADMIN
@@ -137,7 +137,7 @@ def test_03_approve_vendor_triggers_approved_email(mock_dep_sp, mock_delay, mock
 @patch("routers.vendors.supabase")
 @patch("routers.vendors.supabase_admin")
 @patch("routers.vendors.send_vendor_suspended.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_04_suspend_vendor_triggers_suspended_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """PATCH /vendors/{id}/status → Suspended → send_vendor_suspended.delay"""
     app.dependency_overrides[get_current_user] = lambda: ADMIN
@@ -158,12 +158,12 @@ def test_04_suspend_vendor_triggers_suspended_email(mock_dep_sp, mock_delay, moc
 @patch("routers.products.supabase")
 @patch("routers.products.supabase_admin")
 @patch("routers.products.send_product_submitted.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_05_submit_product_triggers_submitted_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """POST /products → send_product_submitted.delay"""
     app.dependency_overrides[get_current_user] = lambda: VENDOR
 
-    mock_dep_sp.table.return_value = mock_db({"role": "vendor"})
+    mock_dep_sp.table.return_value = mock_db({"role": "vendor", "email": "wonderfarms@farmconnect.ng", "full_name": "Wonder Farms"})
     mock_sp.table.return_value = mock_db({"role": "vendor", "email": "wonderfarms@farmconnect.ng", "full_name": "Wonder Farms"})
     mock_admin.table.return_value = mock_db([{"id": "prod-001", "name": "Test Product"}])
 
@@ -192,7 +192,7 @@ def test_05_submit_product_triggers_submitted_email(mock_dep_sp, mock_delay, moc
 @patch("routers.products.supabase")
 @patch("routers.products.supabase_admin")
 @patch("routers.products.send_product_approved.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_06_approve_product_triggers_approved_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """PATCH /products/{id}/status → Approved → send_product_approved.delay"""
     app.dependency_overrides[get_current_user] = lambda: ADMIN
@@ -207,7 +207,7 @@ def test_06_approve_product_triggers_approved_email(mock_dep_sp, mock_delay, moc
     mock_sp.table.side_effect = sp_side_effect
 
     # Admin update returns the updated product with vendor_id
-    mock_admin.table.return_value = mock_db([{"id": "prod-001", "vendor_id": VENDOR.id, "name": "Test Product", "price": 10000, "stock": 50, "status": "Approved"}])
+    mock_admin.table.side_effect = lambda table: sp_side_effect(table) if table == "profiles" else mock_db([{"id": "prod-001", "vendor_id": VENDOR.id, "name": "Test Product", "price": 10000, "stock": 50, "status": "Approved"}])
 
     resp = client.patch("/products/prod-001/status", json={"status": "Approved"})
     assert resp.status_code == 200, resp.text
@@ -225,7 +225,7 @@ def test_06_approve_product_triggers_approved_email(mock_dep_sp, mock_delay, moc
 @patch("routers.products.supabase")
 @patch("routers.products.supabase_admin")
 @patch("routers.products.send_product_rejected.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_07_reject_product_triggers_rejected_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """PATCH /products/{id}/status → Rejected → send_product_rejected.delay"""
     app.dependency_overrides[get_current_user] = lambda: ADMIN
@@ -238,7 +238,7 @@ def test_07_reject_product_triggers_rejected_email(mock_dep_sp, mock_delay, mock
         return mock_db([])
     mock_sp.table.side_effect = sp_side_effect
 
-    mock_admin.table.return_value = mock_db([{"id": "prod-001", "vendor_id": VENDOR.id, "name": "Test Product", "price": 10000, "stock": 50, "status": "Rejected"}])
+    mock_admin.table.side_effect = lambda table: sp_side_effect(table) if table == "profiles" else mock_db([{"id": "prod-001", "vendor_id": VENDOR.id, "name": "Test Product", "price": 10000, "stock": 50, "status": "Rejected"}])
 
     resp = client.patch("/products/prod-001/status", json={"status": "Rejected", "reason": "Poor quality"})
     assert resp.status_code == 200, resp.text
@@ -258,7 +258,7 @@ def test_07_reject_product_triggers_rejected_email(mock_dep_sp, mock_delay, mock
 @patch("routers.orders.supabase_admin")
 @patch("routers.orders.send_order_confirmation.delay")
 @patch("routers.orders.send_new_sale_alert.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_08_place_order_triggers_all_notifications(mock_dep_sp, mock_sale_alert, mock_confirm, mock_admin, mock_sp):
     """POST /orders → send_order_confirmation + send_new_sale_alert + vendor WebSocket alert"""
     app.dependency_overrides[get_current_user] = lambda: CUSTOMER
@@ -300,6 +300,10 @@ def test_08_place_order_triggers_all_notifications(mock_dep_sp, mock_sale_alert,
             return mock_db({"wallet_balance": 315000})  # after deducting
         return mock_db([])
     mock_admin.table.side_effect = admin_side_effect
+    mock_admin.rpc.return_value.execute.return_value.data = {
+        "order": {"id": "ord-001", "total_kobo": 185000}, "subtotal_kobo": 100000,
+        "delivery_fee_kobo": 85000, "total_kobo": 185000, "new_wallet_balance": 315000,
+    }
 
     payload = {
         "items": [{"product_id": "prod-001", "quantity": 10, "unit_price": 10000}],
@@ -332,7 +336,7 @@ def test_08_place_order_triggers_all_notifications(mock_dep_sp, mock_sale_alert,
 @patch("routers.orders.supabase")
 @patch("routers.orders.supabase_admin")
 @patch("routers.orders.send_order_in_transit.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_09_order_in_transit_triggers_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """PATCH /orders/{id}/status → 'In Transit' → send_order_in_transit.delay"""
     app.dependency_overrides[get_current_user] = lambda: VENDOR
@@ -376,7 +380,7 @@ def test_09_order_in_transit_triggers_email(mock_dep_sp, mock_delay, mock_admin,
 @patch("routers.orders.supabase")
 @patch("routers.orders.supabase_admin")
 @patch("routers.orders.send_order_delivered.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_10_order_delivered_triggers_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """PATCH /orders/{id}/status → 'Delivered' → send_order_delivered.delay"""
     app.dependency_overrides[get_current_user] = lambda: VENDOR
@@ -419,7 +423,7 @@ def test_10_order_delivered_triggers_email(mock_dep_sp, mock_delay, mock_admin, 
 @patch("routers.orders.supabase")
 @patch("routers.orders.supabase_admin")
 @patch("routers.orders.send_order_cancelled.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_11_order_cancelled_triggers_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """PATCH /orders/{id}/status → 'Cancelled' → send_order_cancelled.delay"""
     app.dependency_overrides[get_current_user] = lambda: VENDOR
@@ -463,7 +467,7 @@ def test_11_order_cancelled_triggers_email(mock_dep_sp, mock_delay, mock_admin, 
 @patch("routers.wallet.supabase")
 @patch("routers.wallet.supabase_admin")
 @patch("routers.wallet.send_wallet_topup_receipt.delay")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_12_wallet_topup_triggers_receipt_email(mock_dep_sp, mock_delay, mock_admin, mock_sp):
     """POST /wallet/topup → send_wallet_topup_receipt.delay"""
     app.dependency_overrides[get_current_user] = lambda: CUSTOMER
@@ -508,7 +512,7 @@ def test_12_wallet_topup_triggers_receipt_email(mock_dep_sp, mock_delay, mock_ad
 @patch("routers.wallet.supabase_admin")
 @patch("routers.wallet.send_wallet_topup_receipt.delay")
 @patch("routers.wallet.verify_paystack_transaction")
-@patch("dependencies.supabase")
+@patch("dependencies.supabase_admin")
 def test_13_paystack_verify_triggers_receipt_email(mock_dep_sp, mock_verify, mock_delay, mock_admin, mock_sp):
     """POST /wallet/paystack/verify → send_wallet_topup_receipt.delay"""
     app.dependency_overrides[get_current_user] = lambda: CUSTOMER

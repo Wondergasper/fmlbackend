@@ -96,7 +96,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
             mock_admin.storage.from_.return_value.upload.return_value = {}
@@ -118,7 +118,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
             mock_admin.storage.from_.return_value.upload.return_value = {}
@@ -138,7 +138,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
             mock_admin.storage.from_.return_value.upload.return_value = {}
@@ -158,7 +158,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -178,7 +178,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -198,7 +198,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -218,7 +218,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -237,7 +237,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -256,7 +256,7 @@ class TestUploadImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
             mock_admin.storage.from_.return_value.upload.side_effect = Exception("network timeout")
@@ -276,7 +276,7 @@ class TestUploadImage(unittest.TestCase):
         customer = _mock_user("cust-001", "customer")
         app.dependency_overrides[get_current_user] = lambda: customer
 
-        with patch("dependencies.supabase") as mock_dep_sp:
+        with patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("customer")
             resp = client.post(
                 "/uploads/image",
@@ -303,7 +303,7 @@ class TestDeleteImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
             mock_admin.storage.from_.return_value.remove.return_value = {}
@@ -323,7 +323,7 @@ class TestDeleteImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -348,7 +348,7 @@ class TestDeleteImage(unittest.TestCase):
             f"products/vendor-111/../../vendor-999/secret.jpg"
         )
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -370,7 +370,7 @@ class TestDeleteImage(unittest.TestCase):
             f"products/vendor-111/img.jpg"
         )
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_admin.table.return_value = _mock_profile_chain("vendor")
 
@@ -386,7 +386,7 @@ class TestDeleteImage(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: admin
 
         with patch("routers.uploads.supabase_admin") as mock_admin, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("admin")
             mock_admin.table.return_value = _mock_profile_chain("admin")
             mock_admin.storage.from_.return_value.remove.return_value = {}
@@ -420,7 +420,7 @@ class TestCategoriesAccess(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: admin
 
         with patch("routers.admin.supabase") as mock_sp, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("admin")
             mock_sp.table.return_value = self._mock_categories_chain()
 
@@ -437,7 +437,7 @@ class TestCategoriesAccess(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: vendor
 
         with patch("routers.admin.supabase") as mock_sp, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("vendor")
             mock_sp.table.return_value = self._mock_categories_chain()
 
@@ -454,7 +454,7 @@ class TestCategoriesAccess(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: customer
 
         with patch("routers.admin.supabase") as mock_sp, \
-             patch("dependencies.supabase") as mock_dep_sp:
+             patch("dependencies.supabase_admin") as mock_dep_sp:
             mock_dep_sp.table.return_value = _mock_profile_chain("customer")
             mock_sp.table.return_value = self._mock_categories_chain()
 

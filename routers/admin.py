@@ -45,6 +45,11 @@ class CategoryDelete(BaseModel):
 
 CONFIG_ID = "platform-config"
 
+@router.get("/products")
+async def get_all_product_submissions(user=Depends(require_role(["admin"]))):
+    return supabase_admin.table("products").select("*").order("created_at", desc=True).execute().data or []
+
+
 @router.get("/config")
 async def get_platform_config(user=Depends(require_role(["admin"]))):
     """

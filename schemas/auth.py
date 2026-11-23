@@ -1,5 +1,28 @@
 from enum import Enum
-from pydantic import BaseModel, EmailStr, field_validator
+from typing import Literal
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+
+class BuyerMetadata(BaseModel):
+    account_type: Literal['individual', 'business'] = 'individual'
+    business_name: str | None = Field(default=None, min_length=1, max_length=200)
+    business_phone: str | None = Field(default=None, min_length=3, max_length=40)
+
+    @field_validator('business_name', 'business_phone', mode='before')
+    @classmethod
+    def trim_business_fields(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode='after')
+    def validate_business(self):
+        if self.account_type == 'business':
+            if getattr(self, 'role', 'customer') != 'customer':
+                raise ValueError('Business accounts must have the customer role.')
+            if not self.business_name or not self.business_phone:
+                raise ValueError('Business name and phone are required.')
+        elif self.business_name is not None or self.business_phone is not None:
+            raise ValueError('Business metadata requires a business account.')
+        return self
 
 
 class Role(str, Enum):
@@ -45,7 +68,7 @@ ALL_PLATFORM_ROLES: set[str] = {
 }
 
 
-class RegisterRequest(BaseModel):
+class RegisterRequest(BuyerMetadata):
     email: str
     password: str
     full_name: str
